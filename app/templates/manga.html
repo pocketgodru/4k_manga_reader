@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ metadata.title }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-white min-h-screen">
+    <div class="container mx-auto p-6">
+        <a href="/" class="text-orange-500 hover:underline mb-4 inline-block">← Все манги</a>
+        
+        <div class="flex flex-col md:flex-row gap-8 mb-8">
+            <img src="{{ metadata.cover }}" class="w-48 rounded-lg shadow-lg">
+            <div>
+                <h1 class="text-3xl font-bold mb-2">{{ metadata.title }}</h1>
+                <p class="text-gray-400 mb-4">{{ metadata.description }}</p>
+                <div class="flex gap-2 flex-wrap mb-4">
+                    {% for genre in metadata.genres %}
+                    <span class="bg-gray-800 px-2 py-1 rounded text-xs">{{ genre }}</span>
+                    {% endfor %}
+                </div>
+                
+                <!-- Кнопка апскейла всех глав -->
+                <button onclick="upscaleAll('{{ slug }}')" 
+                        id="upscale-all-btn"
+                        class="bg-orange-600 hover:bg-orange-700 px-4 py-2 rounded mb-4">
+                    🚀 Апскейл всех глав (4K)
+                </button>
+                
+                <!-- Прогресс бар -->
+                <div id="progress" class="hidden bg-gray-800 rounded p-4 mb-4">
+                    <div class="flex justify-between items-center mb-2">
+                        <div class="text-sm text-gray-400">Прогресс: <span id="progress-status">Ожидание...</span></div>
+                        <!-- 🔹 Кнопка Стоп -->
+                        <button id="stop-btn" onclick="stopUpscale('{{ slug }}')" 
+                                class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-xs transition hidden">
+                            ⏹️ Стоп
+                        </button>
+                    </div>
+                    <div class="w-full bg-gray-700 rounded-full h-4">
+                        <div id="progress-bar" class="bg-orange-500 h-4 rounded-full transition-all duration-300" style="width: 0%"></div>
+                    </div>
+                    <div id="progress-text" class="text-xs mt-2 text-gray-400">0 / 0 страниц</div>
+                    <div id="progress-chapter" class="text-xs mt-1 text-blue-400"></div>
+                </div>
+            </div>
+        </div>
+
+        <h2 class="text-2xl font-bold mb-4">
+            Главы ({{ chapters|length }})
+            <span class="text-sm text-gray-400 font-normal">
+                | Апскейлено: {{ chapters|selectattr('upscaled')|list|length }}
+            </span>
+        </h2>
+        
+        <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+            {% for chapter in chapters %}
+            <div class="relative">
+                <a href="/manga/{{ slug }}/{{ chapter.name }}" 
+                   class="bg-gray-800 p-4 rounded hover:bg-gray-700 transition text-center block">
+                    <div class="text-xs text-gray-400">Том {{ chapter.volume }}</div>
+                    <div class="font-bold">Глава {{ chapter.chapter }}</div>
+                </a>
+                {% if upscale_status[chapter.name].upscaled %}
+                <span class="absolute top-1 right-1 bg-green-600 text-xs px-2 py-1 rounded">✓ 4K</span>
+                {% else %}
+                <button onclick="upscaleChapter('{{ slug }}', '{{ chapter.name }}')" 
+                        class="absolute bottom-1 right-1 bg-orange-600 text-xs px-2 py-1 rounded hover:bg-orange-700">
+                    ⚡
+                </button>
+                {% endif %}
+                <div class="text-xs text-gray-500 text-center mt-1">
+                    {{ upscale_status[chapter.name].pages_count }} стр.
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <script>
+    let pollingInterval = null;
+
+    // Глобальное управление прогрессом
+    const ProgressManager = {
+        key: (slug) => `upscale_task_${slug}`,
+        
+        save(slug, taskId) {
+            localStorage.setItem(this.key(slug), JSON.stringify({ taskId, timestamp: Date.now() }));
+        },
+        
+        get(slug) {
+            const data = localStorage.getItem(this.key(slug));
+            if (!data) return null;
+            const parsed = JSON.parse(data);
+            // 🔹 Игнорируем задачи старше 1 часа
+            if (Date.now() - parsed.timestamp > 3600000) {
+                localStorage.removeItem(this.key(slug));
+                return null;
+            }
+            return parsed.taskId;
+        },
+        
+        clear(slug) {
+            localStorage.removeItem(this.key(slug));
+        }
+    };
+
+    // Запуск polling с проверкой активной задачи
+    async function initUpscalePolling(slug) {
+        const progress = document.getElementById('progress');
+        const bar = document.getElementById('progress-bar');
+        const text = document.getElementById('progress-text');
+        const status = document.getElementById('progress-status');
+        const stopBtn = document.getElementById('stop-btn');
+        const chapter = document.getElementById('progress-chapter');
+        const btn = document.getElementById('upscale-all-btn');
+        
+        // 1. Проверяем сохранённый task_id
+        let taskId = ProgressManager.get(slug);
+        
+        // 2. Если нет — запрашиваем активную задачу с сервера
+        if (!taskId) {
+            try {
+                const res = await fetch(`/upscale/active/${slug}`);
+                const data = await res.json();
+                if (data.active) taskId = data.task_id;
+            } catch (e) { console.error('Check active task:', e); }
+        }
+        
+        if (!taskId) return; // Нет активной задачи
+        
+        // 3. Показываем прогресс-бар
+        progress.classList.remove('hidden');
+        btn.disabled = true;
+        btn.textContent = '⏳ В процессе...';
+
+        
+        // 4. Запускаем polling
+        const poll = async () => {
+            try {
+                const res = await fetch(`/upscale/status/${taskId}`);
+
+                // Обработка 404 (задача утеряна)
+                if (res.status === 404) {
+                    console.warn('⚠️ Задача не найдена на сервере. Сброс...');
+                    clearInterval(window.upscalePollingInterval);
+                    ProgressManager.clear(slug);
+                    status.textContent = '❌ Сессия утеряна (сервер перезагружен?)';
+                    bar.classList.replace('bg-orange-500', 'bg-red-500');
+                    return;
+                }
+                
+                const data = await res.json();
+
+                
+                if (data.already_upscaled > 0) {
+                    status.textContent = `✓ ${data.already_upscaled} страниц уже готовы`;
+                }
+
+                if (data.status === 'running') {
+                    stopBtn.classList.remove('hidden');
+                } else {
+                    stopBtn.classList.add('hidden');
+                }
+
+                // Обработка отмены
+                if (data.status === 'cancelled') {
+                    clearInterval(window.upscalePollingInterval);
+                    ProgressManager.clear(slug);
+                    status.textContent = '⏹️ Остановлено пользователем';
+                    bar.classList.replace('bg-orange-500', 'bg-red-500');
+                    stopBtn.classList.add('hidden');
+                    return;
+                }
+
+                // Показываем "Подсчёт..." пока total не определён
+                if (data.total === -1) {
+                    status.textContent = '🔍 Подсчёт страниц...';
+                    bar.style.width = '0%';
+                    text.textContent = 'Ожидание...';
+                } else {
+                    const percent = Math.min(100, (data.processed / Math.max(data.total, 1)) * 100);
+                    bar.style.width = percent + '%';
+                    text.textContent = `${data.processed} / ${data.total} новых страниц`;
+                    status.textContent = data.status === 'running' ? 'Обработка...' : 'Завершение...';
+                }
+                
+                chapter.textContent = data.current_chapter ? `📖 ${data.current_chapter}` : '';
+                
+                if (data.status === 'completed') {
+                    clearInterval(window.upscalePollingInterval);
+                    ProgressManager.clear(slug);
+                    status.textContent = 'Готово! ✓';
+                    bar.classList.replace('bg-orange-500', 'bg-green-500');
+                    setTimeout(() => location.reload(), 1500);
+                    return;
+                }
+            } catch (e) {
+                console.error('Polling error:', e);
+            }
+        };
+        
+        // Первый вызов + интервал
+        poll();
+        window.upscalePollingInterval = setInterval(poll, 1000);
+    }
+    
+    async function upscaleChapter(slug, chapter) {
+        const btn = event.target;
+        const originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '⏳';
+        
+        try {
+            const res = await fetch(`/upscale/${slug}/${chapter}`, { method: 'POST' });
+            const data = await res.json();
+            if (data.status === 'ok') {
+                btn.textContent = '✓';
+                btn.classList.replace('bg-orange-600', 'bg-green-600');
+                setTimeout(() => location.reload(), 1000);
+            }
+        } catch (e) {
+            btn.disabled = false;
+            btn.textContent = originalText;
+            alert('Ошибка апскейла: ' + e.message);
+        }
+    }
+
+    async function upscaleAll(slug) {
+        const btn = document.getElementById('upscale-all-btn');
+        const progress = document.getElementById('progress');
+        const bar = document.getElementById('progress-bar');
+        const text = document.getElementById('progress-text');
+        const status = document.getElementById('progress-status');
+        const chapter = document.getElementById('progress-chapter');
+        
+        btn.disabled = true;
+        btn.textContent = '⏳ Запуск...';
+        progress.classList.remove('hidden');
+        
+        try {
+            // Запускаем задачу
+            const res = await fetch(`/upscale/all/${slug}`, { method: 'POST' });
+            const data = await res.json();
+            
+            if (data.status === 'ok' && data.task_id) {
+                // ✅ Сохраняем task_id для восстановления после навигации
+                ProgressManager.save(slug, data.task_id);
+                initUpscalePolling(slug); // Сразу запускаем отображение
+            }
+            
+        } catch (e) {
+            btn.disabled = false;
+            btn.textContent = '🚀 Апскейл всех глав (4K)';
+            status.textContent = 'Ошибка: ' + e.message;
+        }
+    }
+    
+    // Функция остановки
+    async function stopUpscale(slug) {
+        const taskId = ProgressManager.get(slug);
+        if (!taskId) return;
+        
+        const stopBtn = document.getElementById('stop-btn');
+        stopBtn.disabled = true;
+        stopBtn.textContent = '⏳ Остановка...';
+        
+        try {
+            const res = await fetch(`/upscale/cancel/${taskId}`, { method: 'POST' });
+            const data = await res.json();
+            if (data.status === 'ok') {
+                document.getElementById('progress-status').textContent = '⏹️ Остановка...';
+            }
+        } catch (e) {
+            alert('Ошибка остановки: ' + e.message);
+            stopBtn.disabled = false;
+            stopBtn.textContent = '⏹️ Стоп';
+        }
+    }
+
+    // Авто-инициализация при загрузке страницы
+    document.addEventListener('DOMContentLoaded', () => {
+        const slug = '{{ slug }}'; // Jinja переменная
+        if (slug) {
+            initUpscalePolling(slug);
+        }
+    });
+    </script>
+</body>
+</html>

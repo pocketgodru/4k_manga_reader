@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ chapter }} - {{ metadata.title }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+    <style>
+        /* Ограничиваем размер отображения, но сохраняем качество 4K */
+        .manga-page {
+            max-width: 100%;
+            max-height: 85vh;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+            image-rendering: auto;
+        }
+        
+        @media (min-width: 1920px) {
+            .manga-page { max-width: 1600px; }
+        }
+        
+        body { background-color: #111827; }
+    </style>
+</head>
+<!-- директивы @keydown.window для обработки клавиш -->
+<body class="text-white" 
+      x-data="{ 
+          page: 0, 
+          total: {{ total_pages }}, 
+          quality: '{{ quality }}',
+          isUpscaled: {{ 'true' if is_upscaled else 'false' }},
+          prev() { if(this.page > 0) { this.page--; this.scrollToTop(); } },
+          next() { if(this.page < this.total - 1) { this.page++; this.scrollToTop(); } },
+          scrollToTop() { setTimeout(() => window.scrollTo({top: 0, behavior: 'smooth'}), 100); },
+          toggleQuality() { 
+              this.quality = this.quality === 'manga' ? 'upscaled' : 'manga';
+              window.location.href = `/manga/{{ slug }}/{{ chapter }}?quality=${this.quality}`;
+          }
+      }"
+      @keydown.window.arrow-left.prevent="$data.prev()"
+      @keydown.window.arrow-right.prevent="$data.next()"
+      @keydown.window.home.prevent="$data.page = 0; $data.scrollToTop()"
+      @keydown.window.end.prevent="$data.page = $data.total - 1; $data.scrollToTop()"
+      @keydown.window.page-up.prevent="$data.page = Math.max(0, $data.page - 5); $data.scrollToTop()"
+      @keydown.window.page-down.prevent="$data.page = Math.min($data.total - 1, $data.page + 5); $data.scrollToTop()"
+      @keydown.window.space.prevent="$data.next()">
+      
+    <!-- Навигация -->
+    <div class="fixed top-0 left-0 right-0 bg-gray-800/95 backdrop-blur p-4 z-50 flex justify-between items-center shadow-lg">
+        <a href="/manga/{{ slug }}" class="text-orange-500 hover:underline flex items-center gap-2">
+            ← Назад
+        </a>
+        
+        <div class="text-sm font-mono">
+            <span x-text="page + 1"></span> / <span x-text="total"></span>
+            <span class="ml-2 px-2 py-0.5 rounded text-xs" 
+                  :class="quality === 'upscaled' ? 'bg-green-600' : 'bg-gray-600'">
+                <span x-text="quality === 'upscaled' ? '4K' : 'HD'"></span>
+            </span>
+        </div>
+        
+        <div class="space-x-2 flex items-center">
+            <button @click="toggleQuality()" 
+                    class="px-3 py-1.5 rounded text-sm font-medium transition"
+                    :class="quality === 'upscaled' ? 'bg-green-600 hover:bg-green-700' : 'bg-orange-600 hover:bg-orange-700'">
+                <span x-text="quality === 'manga' ? '🔄 Включить 4K' : '🔄 Оригинал'"></span>
+            </button>
+            
+            <button @click="prev()" :disabled="page === 0"
+                    class="bg-gray-700 hover:bg-gray-600 disabled:opacity-50 px-4 py-1.5 rounded transition">
+                ←
+            </button>
+            <button @click="next()" :disabled="page === total - 1"
+                    class="bg-gray-700 hover:bg-gray-600 disabled:opacity-50 px-4 py-1.5 rounded transition">
+                →
+            </button>
+        </div>
+    </div>
+
+    <!-- Изображение -->
+    <div class="pt-24 pb-10 flex justify-center min-h-screen items-start">
+        <img :src="`/image/{{ slug }}/{{ chapter }}/${page}?quality=${quality}`" 
+             class="manga-page shadow-2xl"
+             :alt="`Страница ${page + 1}`"
+             @load="scrollToTop()"
+             loading="lazy">
+    </div>
+
+    <!-- Инфо о размере -->
+    <div class="fixed bottom-4 right-4 bg-gray-800/90 backdrop-blur px-3 py-2 rounded text-xs text-gray-400">
+        <span x-text="quality === 'upscaled' ? '📐 4K (3840×)' : '📐 HD (1920×)'"></span>
+    </div>
+
+    <!-- обработчик клавиатуры с защитой от конфликтов с input/textarea -->
+    <script>
+        document.addEventListener('keydown', (e) => {
+            // игнорируем клавиши, если фокус в поле ввода
+            const tag = e.target.tagName.toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+            
+            // предотвращаем скролл страницы для навигационных клавиш
+            if (['ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(e.key)) {
+                e.preventDefault();
+            }
+        });
+        
+        // Предотвращаем контекстное меню на изображениях
+        document.addEventListener('contextmenu', (e) => {
+            if (e.target.tagName === 'IMG') e.preventDefault();
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,89 @@
+# 🔹 Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 🔹 Виртуальное окружение
+.venv/
+env/
+ENV/
+.cursor/
+old/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 🔹 Данные манги (ОЧЕНЬ ВАЖНО - не коммитить!)
+data/
+manga/
+upscaled/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+
+# 🔹 Конфигурация с чувствительными данными
+.env
+.env.local
+.env.production
+*.secret
+credentials.json
+
+# 🔹 IDE и редакторы
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# 🔹 Логи и временные файлы
+logs/
+*.log
+tmp/
+temp/
+*.tmp
+*.temp
+
+# 🔹 База данных (если используется SQLite)
+*.db
+*.sqlite
+*.sqlite3
+
+# 🔹 Кэш и артефакты сборки
+.cache/
+*.cache
+node_modules/
+package-lock.json
+
+# 🔹 Тесты и покрытие
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# 🔹 Jupyter Notebook (если используется)
+.ipynb_checkpoints/
+
+# 🔹 Docker (если используется)
+docker-compose.override.yml

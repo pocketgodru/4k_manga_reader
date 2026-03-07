@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+Pillow
+pyyaml
+jinja2
+aiofiles
+opencv-python-headless
+numpy
+tqdm

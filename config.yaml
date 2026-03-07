@@ -1,0 +1,10 @@
+data_path: "./data"
+manga_folder: "manga"
+upscaled_folder: "upscaled"
+host: "0.0.0.0"
+port: 8000
+# Простые улучшения для CPU
+enhancements:
+  sharpen: 0.5       # Резкость (0.0 - 1.0)
+  contrast: 1.1      # Контраст (1.0 - 1.5)
+  brightness: 1.0    # Яркость
