@@ -8,3 +8,5 @@ aiofiles
 opencv-python-headless
 numpy
 tqdm
+aiohttp
+mangagraph
