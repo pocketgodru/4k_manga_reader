@@ -1,18 +1,27 @@
 # app/main.py
 from fastapi import FastAPI, Request, HTTPException, Response, BackgroundTasks
 from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
+
 import asyncio
 import yaml
 import os
 from pathlib import Path
 from datetime import datetime
-from app.reader import MangaReader
-from app.enhancer import enhance_for_display, cpu_upscale
 from PIL import Image
 import io
 import tempfile
 from tqdm import tqdm
 import logging as logging
+import atexit
+
+
+from app.downloader.manager import MangaDownloader
+from app.downloader.routes import StartDownloadRequest, router as downloader_router
+from app.downloader.routes import downloader
+from app.reader import MangaReader
+from app.enhancer import enhance_for_display, cpu_upscale
+
 # Загрузка конфига
 with open("config.yaml", 'r', encoding='utf-8') as f:
     config = yaml.safe_load(f)
@@ -34,16 +43,129 @@ reader = MangaReader(
     config['upscaled_folder']
 )
 
+
+# Инициализация downloader
+downloader = MangaDownloader(
+    data_path=reader.base_path,  # ✅ Используем путь из reader
+)
+
+# Подключаем роуты downloader
+app.include_router(downloader_router)
+
+# Обновляем глобальную переменную в routes
+from app.downloader import routes
+routes.downloader = downloader
+
+
 # Глобальное хранилище статуса апскейла
 upscale_tasks = {}
 
+logger.info(f"📚 Reader manga_path: {reader.manga_path}")
+logger.info(f"📥 Downloader manga_path: {downloader.manga_path}")
+
 @app.get("/")
 async def home(request: Request):
+    # 🔹 Локальные манги
     manga_list = reader.get_manga_list()
+    
+    # 🔹 Скачанные манги
+    downloaded_list = []
+    for manga_dir in downloader.data_path.iterdir():
+        if manga_dir.is_dir():
+            meta_path = manga_dir / "metadata.json"
+            if meta_path.exists():
+                import json
+                meta = json.loads(meta_path.read_text(encoding='utf-8'))
+                downloaded_list.append({
+                    "slug": manga_dir.name,
+                    "title": meta.get("title", manga_dir.name),
+                    "cover": meta.get("cover"),
+                    "source": "downloaded",
+                    "downloaded": True,
+                    "genres": meta.get("genres", []),
+                })
+    
+    # 🔹 Объединяем (скачанные в начало или конец — по желанию)
+    all_manga = downloaded_list + manga_list
+    
     return templates.TemplateResponse("index.html", {
         "request": request, 
-        "manga_list": manga_list
+        "manga_list": all_manga
     })
+
+@app.get("/download")
+async def download_page(request: Request):
+    return templates.TemplateResponse("download.html", {"request": request})
+
+@app.get("/download/search")
+async def search_downloads(q: str, limit: int = 10):
+    results = await downloader.search_manga(q, limit)
+    return {"results": [r.model_dump() for r in results]}
+
+@app.get("/download/chapters/{manga_slug}")
+async def get_chapters_list(manga_slug: str):
+    from app.downloader.services.mangalib import MangaLibService
+    service = MangaLibService()
+    try:
+        chapters = await service.get_chapters(manga_slug)
+        return {"chapters": [{"number": c.number, "name": c.name} for c in chapters]}
+    except Exception as e:
+        return {"chapters": [], "error": str(e)}
+    finally:
+        await service.close()
+
+@app.post("/download/start/{manga_slug}")
+async def start_download(manga_slug: str, request: StartDownloadRequest, background_tasks: BackgroundTasks):
+    chapter_list = None
+    if request.chapters:
+        try:
+            chapter_list = [int(c.strip()) for c in request.chapters.split(",")]
+        except:
+            raise HTTPException(status_code=400, detail="Неверный формат глав")
+    
+    task_id = f"dl_{manga_slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    background_tasks.add_task(
+        downloader.download_manga_smart,
+        manga_slug,
+        request.url,
+        manga_slug,
+        chapter_list,
+        task_id
+    )
+    
+    return {"status": "ok", "task_id": task_id}
+
+@app.post("/download/cancel/{task_id}")
+async def cancel_download(task_id: str):
+    if downloader.cancel_task(task_id):
+        return {"status": "ok"}
+    raise HTTPException(status_code=404, detail="Задача не найдена")
+
+@app.get("/download/status/{task_id}")
+async def get_download_status(task_id: str):
+    task = downloader.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+    
+    return {
+        "task_id": task.task_id,
+        "status": task.status.value,
+        "progress": task.progress,
+        "current_chapter": task.current_chapter,
+        "current_page": task.current_page,
+        "total_chapters": task.total_chapters,
+        "downloaded_chapters": task.downloaded_chapters,
+        "errors": task.errors,
+        "manga_slug": task.manga_slug,
+        "manga_title": task.manga_title,
+    }
+
+@app.get("/download/list")
+async def list_downloads():
+    downloads = downloader.get_downloaded_manga()
+    return {"downloads": [d.model_dump() for d in downloads]}
+
 
 @app.get("/manga/{slug}")
 async def manga_info(request: Request, slug: str):
@@ -51,15 +173,27 @@ async def manga_info(request: Request, slug: str):
     chapters_info = reader.get_chapters_with_info(slug)
     upscale_status = reader.get_upscale_status(slug)
     
-    if not metadata:
+    # 🔹 Проверяем, есть ли metadata.json (скачанная манга)
+    manga_dir = downloader.manga_path / slug
+    is_downloaded = (manga_dir / "metadata.json").exists()
+    
+    if not metadata and not is_downloaded:
         raise HTTPException(status_code=404, detail="Манга не найдена")
     
+    # 🔹 Если нет локальных метаданных, но есть metadata.json — используем его
+    if not metadata and is_downloaded:
+        import json
+        meta_path = manga_dir / "metadata.json"
+        metadata = json.loads(meta_path.read_text(encoding='utf-8'))
+    
+    
     return templates.TemplateResponse("manga.html", {
-        "request": request, 
-        "metadata": metadata, 
+        "request": request,
+        "metadata": metadata or {"title": slug},
         "chapters": chapters_info,
         "upscale_status": upscale_status,
-        "slug": slug
+        "slug": slug,
+        "is_downloaded": is_downloaded,
     })
 
 @app.get("/manga/{slug}/{chapter}")
@@ -128,6 +262,62 @@ async def serve_image(
         
         return Response(content=buf.getvalue(), media_type="image/jpeg")
 
+@app.get("/api/manga/list")
+async def api_manga_list():
+    """API для списка манги — ВСЯ манга локальная"""
+    manga_list = []
+    
+    # 🔹 Сканируем data/manga/
+    manga_path = Path(config['data_path']) / config['manga_folder']
+    if manga_path.exists():
+        for manga_dir in manga_path.iterdir():
+            if not manga_dir.is_dir() or manga_dir.name.startswith('.'):
+                continue
+            
+            meta_file = manga_dir / "metadata.json"
+            
+            # 🔹 Загружаем метаданные
+            if meta_file.exists():
+                import json
+                with open(meta_file, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)
+            else:
+                meta = reader.get_metadata(manga_dir.name) or {}
+            
+            # 🔹 Статус глав
+            status = reader.get_upscale_status(manga_dir.name)
+            total_chapters = len(status)
+            completed_chapters = sum(1 for s in status.values() if s.get('download_completed') or s.get('pages_downloaded', 0) >= s.get('pages_expected', 0))
+            
+            manga_list.append({
+                "slug": manga_dir.name,
+                "title": meta.get("title", manga_dir.name),
+                "cover": meta.get("cover"),
+                "genres": meta.get("genres", []),
+                "status": meta.get("status"),
+                "rating": meta.get("rating"),
+                "upscaled": any(s.get('upscaled') for s in status.values()),
+                "total_chapters": total_chapters,
+                "completed_chapters": completed_chapters,
+                "completed": completed_chapters >= total_chapters and total_chapters > 0,
+                "in_progress": completed_chapters > 0 and completed_chapters < total_chapters,
+                "progress": (completed_chapters / max(total_chapters, 1)) * 100 if total_chapters > 0 else 0,
+            })
+    
+    return {"manga_list": manga_list}
+
+@atexit.register
+def cleanup_resources():
+    """Очистка при завершении"""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(downloader.cleanup())
+        else:
+            loop.run_until_complete(downloader.cleanup())
+    except:
+        pass
 
 # Функция апскейла (выносится в отдельный метод)
 def _run_upscale_sync(slug: str, scale: int, task_id: str, chapters: list, chapter_pages: dict, config: dict, reader):

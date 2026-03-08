@@ -49,29 +49,60 @@
 
         <h2 class="text-2xl font-bold mb-4">
             Главы ({{ chapters|length }})
+            <!-- ✅ Компактный вариант -->
             <span class="text-sm text-gray-400 font-normal">
-                | Апскейлено: {{ chapters|selectattr('upscaled')|list|length }}
+                | Апскейлено: 
+                <span class="text-purple-400 font-bold">
+                    {{ upscale_status.values()|selectattr('upscaled')|list|length }}
+                </span> / {{ chapters|length }}
             </span>
         </h2>
         
         <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+            <!-- 🔹 В цикле глав: надёжное получение количества страниц -->
             {% for chapter in chapters %}
-            <div class="relative">
+            {% set chapter_status = upscale_status.get(chapter.name, {}) %}
+
+            <!-- 🔹 Определяем количество страниц: приоритет - chapter_status, затем chapter, затем подсчёт на лету -->
+            {% set pages_count = chapter_status.pages_count | default(chapter.pages_count) | default('?') %}
+
+            <div class="relative group">
                 <a href="/manga/{{ slug }}/{{ chapter.name }}" 
-                   class="bg-gray-800 p-4 rounded hover:bg-gray-700 transition text-center block">
+                class="bg-gray-800 p-4 rounded hover:bg-gray-700 transition text-center block">
                     <div class="text-xs text-gray-400">Том {{ chapter.volume }}</div>
                     <div class="font-bold">Глава {{ chapter.chapter }}</div>
+                    
+                    <!-- 🔹 Статус скачивания -->
+                    {% if chapter.is_downloaded %}
+                        {% if chapter_status.download_completed %}
+                            <span class="absolute top-1 left-1 bg-green-600 text-xs px-2 py-1 rounded">✓</span>
+                        {% else %}
+                            <span class="absolute top-1 left-1 bg-yellow-600 text-xs px-2 py-1 rounded"
+                                title="Скачано {{ chapter_status.pages_downloaded }} из {{ chapter_status.pages_expected }}">
+                                ⏳
+                            </span>
+                        {% endif %}
+                    {% endif %}
+                    
+                    <!-- 🔹 Статус апскейла -->
+                    {% if not chapter.is_downloaded and chapter_status.upscaled %}
+                        <span class="absolute top-1 right-1 bg-purple-600 text-xs px-2 py-1 rounded">4K</span>
+                    {% endif %}
                 </a>
-                {% if upscale_status[chapter.name].upscaled %}
-                <span class="absolute top-1 right-1 bg-green-600 text-xs px-2 py-1 rounded">✓ 4K</span>
-                {% else %}
-                <button onclick="upscaleChapter('{{ slug }}', '{{ chapter.name }}')" 
-                        class="absolute bottom-1 right-1 bg-orange-600 text-xs px-2 py-1 rounded hover:bg-orange-700">
-                    ⚡
-                </button>
-                {% endif %}
+                
+                <!-- 🔹 Кнопки действий -->
+                <div class="absolute bottom-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition">
+                    {% if not chapter.is_downloaded and not chapter_status.upscaled %}
+                        <button onclick="upscaleChapter('{{ slug }}', '{{ chapter.name }}')" 
+                                class="bg-orange-600 text-xs px-2 py-1 rounded hover:bg-orange-700">
+                            ⚡
+                        </button>
+                    {% endif %}
+                </div>
+                
+                <!-- 🔹 Инфо о страницах: теперь всегда показывает число -->
                 <div class="text-xs text-gray-500 text-center mt-1">
-                    {{ upscale_status[chapter.name].pages_count }} стр.
+                    {{ pages_count }} стр.
                 </div>
             </div>
             {% endfor %}
@@ -276,6 +307,38 @@
             alert('Ошибка остановки: ' + e.message);
             stopBtn.disabled = false;
             stopBtn.textContent = '⏹️ Стоп';
+        }
+    }
+
+    async function checkUpdates(slug, chapter) {
+        const btn = event.target;
+        const original = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '🔍';
+        
+        try {
+            // 🔹 Запрос к API для проверки новых страниц
+            const res = await fetch(`/downloaded/${slug}/${chapter}/check-updates`);
+            const data = await res.json();
+            
+            if (data.new_pages > 0) {
+                if (confirm(`Найдено ${data.new_pages} новых страниц! Скачать?`)) {
+                    // 🔹 Запуск докачки
+                    await fetch(`/download/continue/${slug}`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({chapters: [chapter.replace('chapter_', '')]})
+                    });
+                    location.reload();
+                }
+            } else {
+                alert('Новых страниц нет ✓');
+            }
+        } catch (e) {
+            alert('Ошибка проверки: ' + e.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = original;
         }
     }
 

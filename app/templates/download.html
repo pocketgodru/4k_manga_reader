@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Скачать мангу - MangaReader 4K</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+</head>
+<body class="bg-gray-900 text-white min-h-screen" x-data="downloadApp()">
+    
+    <!-- Навигация -->
+    <nav class="bg-gray-800 border-b border-gray-700">
+        <div class="container mx-auto px-6 py-4 flex justify-between items-center">
+            <h1 class="text-xl font-bold text-orange-500">📥 MangaDownloader</h1>
+            <a href="/" class="text-gray-300 hover:text-white transition">← На главную</a>
+        </div>
+    </nav>
+
+    <div class="container mx-auto px-6 py-8">
+        
+        <!-- 🔍 Поиск манги -->
+        <div class="bg-gray-800 rounded-lg p-6 mb-8 shadow-lg">
+            <h2 class="text-2xl font-bold mb-4">Поиск на MangaLib</h2>
+            <div class="flex gap-3">
+                <input 
+                    type="text" 
+                    x-model="searchQuery" 
+                    @keydown.enter="searchManga()"
+                    placeholder="Название манги (например, Black Clover)..." 
+                    class="flex-1 bg-gray-700 border border-gray-600 rounded px-4 py-3 focus:outline-none focus:border-orange-500 transition"
+                >
+                <button 
+                    @click="searchManga()" 
+                    :disabled="searching"
+                    class="bg-orange-600 hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-3 rounded font-medium transition flex items-center gap-2">
+                    <span x-show="!searching">🔍 Найти</span>
+                    <span x-show="searching">⏳ Поиск...</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- 📋 Результаты поиска -->
+        <div x-show="searchResults.length > 0" class="mb-8" x-transition>
+            <h2 class="text-xl font-bold mb-4 flex justify-between items-center">
+                <span>Результаты (<span x-text="searchResults.length"></span>)</span>
+                <button @click="searchResults = []" class="text-sm text-gray-400 hover:text-white">✕ Очистить</button>
+            </h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <template x-for="manga in searchResults" :key="manga.slug_url">
+                    <div class="bg-gray-800 rounded-lg overflow-hidden hover:bg-gray-750 transition shadow-lg group">
+                        <div class="flex">
+                            <!-- Обложка -->
+                            <div class="w-32 h-48 flex-shrink-0 bg-gray-700">
+                                <img :src="manga.cover || 'https://via.placeholder.com/128x192?text=No+Cover'" 
+                                     class="w-full h-full object-cover" 
+                                     :alt="manga.rus_name"
+                                     @error="this.src='https://via.placeholder.com/128x192?text=Error'">
+                            </div>
+                            
+                            <!-- Инфо -->
+                            <div class="flex-1 p-4 flex flex-col justify-between">
+                                <div>
+                                    <h3 class="font-bold text-lg mb-1 line-clamp-2" x-text="manga.rus_name || manga.name"></h3>
+                                    <p class="text-sm text-gray-400 mb-2" x-text="manga.eng_name"></p>
+                                    
+                                    <div class="flex flex-wrap gap-2 mb-3">
+                                        <span class="text-xs bg-gray-700 px-2 py-1 rounded" x-text="manga.type"></span>
+                                        <span class="text-xs bg-gray-700 px-2 py-1 rounded" x-text="manga.status"></span>
+                                        <span class="text-xs bg-yellow-600/20 text-yellow-500 px-2 py-1 rounded" x-text="`⭐ ${manga.rating}`"></span>
+                                    </div>
+                                    
+                                    <div class="text-xs text-gray-500 mb-3" x-text="manga.release_year ? `${manga.release_year} г.` : ''"></div>
+                                </div>
+                                
+                                <button 
+                                    @click="openDownloadModal(manga)" 
+                                    class="w-full bg-green-600 hover:bg-green-700 text-sm py-2 rounded transition font-medium">
+                                    📥 Скачать
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+
+        <!-- ⏳ Активная загрузка -->
+        <div x-show="activeTask" class="bg-gray-800 rounded-lg p-6 mb-8 shadow-lg border-l-4" 
+             :class="activeTask.status === 'completed' ? 'border-green-500' : activeTask.status === 'error' ? 'border-red-500' : 'border-blue-500'"
+             x-transition>
+            
+            <div class="flex justify-between items-center mb-4">
+                <div>
+                    <h2 class="text-xl font-bold">
+                        <span x-show="activeTask.status === 'running'">⏳ Скачивание:</span>
+                        <span x-show="activeTask.status === 'completed'">✅ Готово:</span>
+                        <span x-show="activeTask.status === 'cancelled'">⏹️ Отменено:</span>
+                        <span x-show="activeTask.status === 'error'">❌ Ошибка:</span>
+                        <span x-text="activeTask.manga_title"></span>
+                    </h2>
+                    <p class="text-sm text-gray-400 mt-1">
+                        <span x-show="activeTask.current_chapter">Глава: <span x-text="activeTask.current_chapter"></span></span>
+                        <span x-show="activeTask.current_page">• Страница: <span x-text="activeTask.current_page"></span></span>
+                    </p>
+                </div>
+                
+                <button 
+                    x-show="activeTask.status === 'running'"
+                    @click="cancelDownload()" 
+                    :disabled="cancelling"
+                    class="bg-red-600 hover:bg-red-700 disabled:opacity-50 px-4 py-2 rounded text-sm transition">
+                    <span x-text="cancelling ? '⏳...' : '⏹️ Стоп'"></span>
+                </button>
+            </div>
+            
+            <!-- Прогресс бар -->
+            <div class="w-full bg-gray-700 rounded-full h-6 mb-3 overflow-hidden">
+                <div class="h-full rounded-full transition-all duration-500 ease-out flex items-center justify-end pr-2 text-xs font-bold"
+                     :class="activeTask.status === 'completed' ? 'bg-green-500' : activeTask.status === 'error' ? 'bg-red-500' : 'bg-blue-500'"
+                     :style="`width: ${activeTask.progress}%`">
+                    <span x-show="activeTask.progress > 10" x-text="`${Math.round(activeTask.progress)}%`"></span>
+                </div>
+            </div>
+            
+            <div class="flex justify-between text-sm text-gray-400">
+                <span>Скачано глав: <span x-text="activeTask.downloaded_chapters?.length || 0"></span> / <span x-text="activeTask.total_chapters || '?'"></span></span>
+                <span x-show="activeTask.errors?.length > 0" class="text-red-400">Ошибок: <span x-text="activeTask.errors.length"></span></span>
+            </div>
+            
+            <!-- Кнопка перехода к чтению -->
+            <div x-show="activeTask.status === 'completed'" class="mt-4 pt-4 border-t border-gray-700">
+                <a :href="`/downloaded/${activeTask.manga_slug}`" 
+                   class="inline-block bg-green-600 hover:bg-green-700 px-6 py-2 rounded font-medium transition">
+                    📖 Читать скачанное
+                </a>
+            </div>
+        </div>
+
+        <!-- 📚 Скачанные манги -->
+        <div>
+            <h2 class="text-2xl font-bold mb-4">📚 Моя библиотека загрузок</h2>
+            
+            <div x-show="downloads.length === 0" class="text-gray-500 text-center py-12 bg-gray-800 rounded-lg">
+                <p class="text-lg">📭 Пока ничего не скачано</p>
+                <p class="text-sm mt-2">Используйте поиск выше, чтобы добавить мангу</p>
+            </div>
+            
+            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4" x-init="loadDownloads()">
+                <template x-for="dl in downloads" :key="dl.source_url">
+                    <a :href="`/manga/${normalizeSlug(dl.source_url.split('/').pop())}`" 
+                       class="bg-gray-800 rounded-lg overflow-hidden hover:bg-gray-700 transition group block shadow-lg">
+                        <div class="aspect-[2/3] bg-gray-700 relative">
+                            <img :src="dl.cover || 'https://via.placeholder.com/200x300?text=No+Cover'" 
+                                 class="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                                 @error="this.src='https://via.placeholder.com/200x300?text=Error'">
+                            
+                            <!-- Бейдж завершения -->
+                            <div class="absolute top-2 right-2">
+                                <span class="bg-green-600/90 text-xs px-2 py-1 rounded font-bold" 
+                                      x-show="dl.completed_chapters === dl.total_chapters">✓</span>
+                            </div>
+                        </div>
+                        <div class="p-3">
+                            <h3 class="font-bold text-sm line-clamp-2 mb-1" x-text="dl.title"></h3>
+                            <div class="text-xs text-gray-400 flex justify-between">
+                                <span>📖 <span x-text="dl.completed_chapters"></span>/<span x-text="dl.total_chapters"></span></span>
+                                <span x-text="new Date(dl.updated_at).toLocaleDateString('ru-RU')"></span>
+                            </div>
+                        </div>
+                    </a>
+                </template>
+            </div>
+        </div>
+    </div>
+
+    <!-- 📥 Модальное окно выбора глав -->
+    <div x-show="downloadModal.open" 
+         class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+         x-transition
+         @click.self="downloadModal.open = false">
+        
+        <div class="bg-gray-800 rounded-lg max-w-2xl w-full max-h-[80vh] overflow-hidden flex flex-col">
+            <!-- Заголовок -->
+            <div class="p-6 border-b border-gray-700">
+                <h2 class="text-2xl font-bold mb-2" x-text="downloadModal.manga?.rus_name"></h2>
+                <p class="text-gray-400 text-sm">Выберите главы для скачивания</p>
+            </div>
+            
+            <!-- Список глав -->
+            <div class="flex-1 overflow-y-auto p-6">
+                <div class="flex gap-2 mb-4">
+                    <button @click="selectAllChapters()" class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded transition">
+                        ✓ Все
+                    </button>
+                    <button @click="deselectAllChapters()" class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded transition">
+                        ✕ Сброс
+                    </button>
+                    <button @click="selectLast10Chapters()" class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded transition">
+                        Последние 10
+                    </button>
+                </div>
+                
+                <div class="text-sm text-gray-400 mb-3">
+                    Выбрано: <span class="text-white font-bold" x-text="downloadModal.selectedChapters.length"></span> глав
+                </div>
+                
+                <div class="grid grid-cols-5 md:grid-cols-8 gap-2">
+                    <template x-for="ch in downloadModal.chapters" :key="ch.number">
+                        <button 
+                            @click="toggleChapter(ch.number)"
+                            class="py-2 px-3 rounded text-sm font-medium transition border"
+                            :class="downloadModal.selectedChapters.includes(ch.number) 
+                                ? 'bg-orange-600 border-orange-500 text-white' 
+                                : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'">
+                            <span x-text="ch.number"></span>
+                        </button>
+                    </template>
+                </div>
+            </div>
+            
+            <!-- Кнопки действия -->
+            <div class="p-6 border-t border-gray-700 flex gap-3">
+                <button @click="downloadModal.open = false" 
+                        class="flex-1 bg-gray-700 hover:bg-gray-600 py-3 rounded font-medium transition">
+                    Отмена
+                </button>
+                <button @click="confirmDownload()" 
+                        :disabled="downloadModal.selectedChapters.length === 0"
+                        class="flex-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed py-3 rounded font-medium transition">
+                    📥 Начать скачивание (<span x-text="downloadModal.selectedChapters.length"></span>)
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    function downloadApp() {
+        return {
+            normalizeSlug(slug) {
+                // 715--black-clover → 715_black_clover
+                // some-manga → some_manga
+                return slug.replace(/--/g, '_').replace(/-/g, '_');
+            },
+
+            searchQuery: '',
+            searching: false,
+            searchResults: [],
+            
+            activeTask: null,
+            pollingInterval: null,
+            cancelling: false,
+            
+            downloads: [],
+            
+            downloadModal: {
+                open: false,
+                manga: null,
+                chapters: [],
+                selectedChapters: []
+            },
+            
+            async searchManga() {
+                if (!this.searchQuery.trim()) return;
+                
+                this.searching = true;
+                this.searchResults = [];
+                
+                try {
+                    const res = await fetch(`/download/search?q=${encodeURIComponent(this.searchQuery)}&limit=20`);
+                    const data = await res.json();
+                    this.searchResults = data.results || [];
+                    
+                    if (this.searchResults.length === 0) {
+                        alert('Ничего не найдено 😔');
+                    }
+                } catch (e) {
+                    alert('Ошибка поиска: ' + e.message);
+                } finally {
+                    this.searching = false;
+                }
+            },
+            
+            async openDownloadModal(manga) {
+                this.downloadModal.manga = manga;
+                this.downloadModal.open = true;
+                this.downloadModal.chapters = [];
+                this.downloadModal.selectedChapters = [];
+                
+                // 🔹 Загружаем список глав
+                try {
+                    const res = await fetch(`/download/chapters/${manga.slug_url}`);
+                    const data = await res.json();
+                    this.downloadModal.chapters = data.chapters || [];
+                    
+                    // По умолчанию выбираем последние 10 глав
+                    this.selectLast10Chapters();
+                } catch (e) {
+                    console.error('Ошибка загрузки глав:', e);
+                    // Фоллбэк: создаём заглушку 1-50
+                    this.downloadModal.chapters = Array.from({length: 50}, (_, i) => ({number: i + 1}));
+                    this.selectLast10Chapters();
+                }
+            },
+            
+            toggleChapter(number) {
+                const idx = this.downloadModal.selectedChapters.indexOf(number);
+                if (idx === -1) {
+                    this.downloadModal.selectedChapters.push(number);
+                    this.downloadModal.selectedChapters.sort((a, b) => a - b);
+                } else {
+                    this.downloadModal.selectedChapters.splice(idx, 1);
+                }
+            },
+            
+            selectAllChapters() {
+                this.downloadModal.selectedChapters = this.downloadModal.chapters.map(c => c.number);
+            },
+            
+            deselectAllChapters() {
+                this.downloadModal.selectedChapters = [];
+            },
+            
+            selectLast10Chapters() {
+                const all = this.downloadModal.chapters.map(c => c.number).sort((a, b) => a - b);
+                this.downloadModal.selectedChapters = all.slice(-10);
+            },
+            
+            async confirmDownload() {
+                const manga = this.downloadModal.manga;
+                const chapters = this.downloadModal.selectedChapters.join(',');
+                
+                this.downloadModal.open = false;
+                
+                try {
+                    const res = await fetch(`/download/start/${manga.slug_url}`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            url: manga.url,
+                            chapters: chapters
+                        })
+                    });
+                    
+                    const data = await res.json();
+                    
+                    if (data.task_id) {
+                        this.activeTask = {
+                            task_id: data.task_id,
+                            manga_slug: manga.slug_url,
+                            manga_title: manga.rus_name || manga.name,
+                            status: 'running',
+                            progress: 0,
+                            downloaded_chapters: [],
+                            total_chapters: this.downloadModal.selectedChapters.length,
+                            errors: []
+                        };
+                        this.startPolling(data.task_id);
+                    } else {
+                        alert('Ошибка запуска: ' + (data.detail || 'Неизвестная ошибка'));
+                    }
+                } catch (e) {
+                    alert('Ошибка запуска: ' + e.message);
+                }
+            },
+            
+            async cancelDownload() {
+                if (!this.activeTask?.task_id) return;
+                
+                this.cancelling = true;
+                try {
+                    await fetch(`/download/cancel/${this.activeTask.task_id}`, {method: 'POST'});
+                } catch (e) {
+                    console.error('Ошибка отмены:', e);
+                } finally {
+                    this.cancelling = false;
+                }
+            },
+            
+            startPolling(taskId) {
+                if (this.pollingInterval) clearInterval(this.pollingInterval);
+                
+                this.pollingInterval = setInterval(async () => {
+                    try {
+                        const res = await fetch(`/download/status/${taskId}`);
+                        const data = await res.json();
+                        
+                        if (data.error) {
+                            clearInterval(this.pollingInterval);
+                            return;
+                        }
+                        
+                        this.activeTask = {
+                            ...this.activeTask,
+                            ...data,
+                            manga_slug: data.manga_slug || this.activeTask.manga_slug,
+                            manga_title: data.manga_title || this.activeTask.manga_title
+                        };
+                        
+                        // 🔹 Завершение
+                        if (['completed', 'cancelled', 'error'].includes(data.status)) {
+                            clearInterval(this.pollingInterval);
+                            this.loadDownloads(); // Обновить список
+                            
+                            if (data.status === 'completed') {
+                                setTimeout(() => {
+                                    // Можно автоматически перейти к чтению
+                                    // window.location.href = `/downloaded/${this.activeTask.manga_slug}`;
+                                }, 2000);
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Polling error:', e);
+                    }
+                }, 1000);
+            },
+            
+            async loadDownloads() {
+                try {
+                    const res = await fetch('/download/list');
+                    const data = await res.json();
+                    this.downloads = data.downloads || [];
+                } catch (e) {
+                    console.error('Load downloads error:', e);
+                }
+            }
+        }
+    }
+    </script>
+</body>
+</html>

@@ -76,30 +76,75 @@ class MangaReader:
             return sorted(chapters, key=lambda x: self.parse_chapter_name(x))
         return []
     
-    def get_chapters_with_info(self, slug: str, source: str = "manga") -> List[Dict]:
-        """Возвращает главы с распарсенной информацией для отображения"""
-        chapters = self.get_chapters(slug, source)
-        metadata = self.get_metadata(slug, source="manga")
-        result = []
+    def get_chapters_with_info(self, slug: str) -> List[dict]:
+        """Возвращает список глав, отсортированный по номеру"""
         
-        for chapter_name in chapters:
-            volume, chapter_num = self.parse_chapter_name(chapter_name)
+        manga_path = self.manga_path / slug
+        #print(manga_path)
+        if not manga_path.exists():
+            return []
+        
+        def _parse_chapter_key(chapter_name: str) -> tuple:
+            """
+            Парсит имя главы формата v{vol}c{num} и возвращает кортеж для сортировки.
+            Примеры:
+                'v1c7' → (1, 7.0)
+                'v1c7.5' → (1, 7.5)
+                'v37c3680' → (37, 3680.0)
+                'chapter_001' → (0, 1.0)  # фоллбэк
+            """
+            # 🔹 Основной формат: v{vol}c{num} или v{vol}c{num.sub}
+            match = re.match(r'v(\d+)c(\d+(?:\.\d+)?)', chapter_name)
+            if match:
+                volume = int(match.group(1))
+                chapter = float(match.group(2))
+                return (volume, chapter)
             
-            # Пытаемся получить доп. инфо из metadata
-            meta_chapter = {}
-            if metadata and 'chapters' in metadata:
-                meta_chapter = metadata['chapters'].get(chapter_name, {})
+            # 🔹 Фоллбэк: chapter_XXX
+            match = re.match(r'chapter_(\d+(?:\.\d+)?)', chapter_name)
+            if match:
+                return (0, float(match.group(1)))
             
-            result.append({
-                'name': chapter_name,
-                'volume': int(volume),
-                'chapter': chapter_num,
-                'display': f"Том {int(volume)}, Глава {chapter_num}",
-                'pages': meta_chapter.get('pages_downloaded', 0),
-                'upscaled': meta_chapter.get('upscaled', False)
+            # 🔹 Неизвестный формат — в конец списка
+            return (9999, 9999)
+    
+        chapters = []
+        
+        for chapter_dir in manga_path.iterdir():
+            if not chapter_dir.is_dir() or chapter_dir.name.startswith('.'):
+                continue
+            
+            chapter_name = chapter_dir.name
+            
+            # 🔹 Считаем страницы (все форматы)
+            pages = (list(chapter_dir.glob("*.png")) + 
+                    list(chapter_dir.glob("*.jpg")) + 
+                    list(chapter_dir.glob("*.jpeg")) +
+                    list(chapter_dir.glob("*.webp")))
+            
+            # 🔹 Извлекаем номер главы для отображения
+            match = re.match(r'v(\d+)c(\d+(?:\.\d+)?)', chapter_name)
+            if match:
+                display_chapter = match.group(2)  # Показываем только номер главы
+            else:
+                display_chapter = chapter_name.replace("chapter_", "")
+            
+            chapters.append({
+                "name": chapter_name,
+                "chapter": display_chapter,
+                "volume": int(match.group(1)) if match else 1,
+                "pages_count": len(pages),
+                "_sort_key": _parse_chapter_key(chapter_name)  # 🔹 Для сортировки
             })
         
-        return result
+        # 🔹 Сортируем: сначала по тому, потом по главе
+        chapters.sort(key=lambda x: x["_sort_key"])
+        
+        # 🔹 Удаляем служебное поле
+        for ch in chapters:
+            del ch["_sort_key"]
+        
+        return chapters
     
     def get_pages(self, slug: str, chapter: str, quality: str = "manga") -> List[str]:
         """Возвращает список путей к изображениям"""
@@ -126,17 +171,63 @@ class MangaReader:
                 if f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp']]
         return len(files) > 0
     
-    def get_upscale_status(self, slug: str) -> Dict:
-        """Возвращает статус апскейла по всем главам"""
-        chapters = self.get_chapters(slug, source="manga")
+    def get_upscale_status(self, slug: str) -> dict:
+        """Возвращает статус глав с учётом metadata.json"""
+        
         status = {}
-        for chapter in chapters:
-            status[chapter] = {
-                "upscaled": self.is_chapter_upscaled(slug, chapter),
-                "pages_count": len(self.get_pages(slug, chapter, quality="manga")),
-                "volume": self.parse_chapter_name(chapter)[0],
-                "chapter_num": self.parse_chapter_name(chapter)[1]
+        manga_path =  self.manga_path / slug
+        upscaled_path =  self.upscaled_path / slug
+        if not manga_path.exists():
+            return {}
+        
+        # 🔹 Загружаем metadata.json (если есть)
+        chapters_meta = {}
+        meta_file = manga_path / "metadata.json"
+        if meta_file.exists():
+            try:
+                with open(meta_file, 'r', encoding='utf-8') as f:
+                    full_meta = json.load(f)
+                chapters_meta = full_meta.get("chapters", {})
+            except:
+                pass
+        
+        # 🔹 Обходим главы
+        for chapter_dir in manga_path.iterdir():
+            if not chapter_dir.is_dir() or chapter_dir.name.startswith('.'):
+                continue
+            
+            chapter_name = chapter_dir.name
+            
+            # 🔹 Считаем страницы
+            pages = (list(chapter_dir.glob("*.png")) +
+                    list(chapter_dir.glob("*.jpg")) +
+                    list(chapter_dir.glob("*.jpeg")) +
+                    list(chapter_dir.glob("*.webp")))
+            total_pages = len(pages)
+            
+            # 🔹 Проверяем апскейл
+            upscaled_dir = upscaled_path / chapter_name
+            is_upscaled = False
+            upscaled_count = 0
+            
+            if upscaled_dir.exists():
+                upscaled_pages = list(upscaled_dir.glob("*.png")) + list(upscaled_dir.glob("*.jpg"))
+                upscaled_count = len(upscaled_pages)
+                is_upscaled = upscaled_count >= total_pages and total_pages > 0
+            
+            # 🔹 Метаданные скачивания
+            dl_meta = chapters_meta.get(chapter_name, {})
+            
+            status[chapter_name] = {
+                "upscaled": is_upscaled,
+                "pages_count": total_pages,
+                "upscaled_count": upscaled_count,
+                "is_downloaded": bool(chapters_meta),  # Если есть metadata.json — скачанная
+                "download_completed": dl_meta.get("completed", False) if dl_meta else None,
+                "pages_downloaded": dl_meta.get("pages_downloaded", total_pages) if dl_meta else total_pages,
+                "pages_expected": dl_meta.get("pages_expected", total_pages) if dl_meta else total_pages,
             }
+        
         return status
     
     def create_upscaled_metadata(self, slug: str) -> Dict:
@@ -170,3 +261,52 @@ class MangaReader:
         upscaled_meta['upscaled_chapters'] = sum(1 for c in chapters_status.values() if c['upscaled'])
         
         return upscaled_meta
+
+    def get_downloaded_chapter_status(self, slug: str) -> Dict[str, dict]:
+        """
+        Получает статус глав из скачанной манги (metadata.json)
+        Возвращает: { "v1c1.0": {"completed": True, "pages_downloaded": 52, "pages_expected": 52}, ... }
+        """
+        from pathlib import Path
+        import json
+        
+        downloader = None
+        # 🔹 Попытка импортировать downloader (если модуль инициализирован)
+        try:
+            from app.main import downloader
+        except:
+            pass
+        
+        if not downloader:
+            # 🔹 Фоллбэк: прямой доступ к папке downloads
+            downloads_path = Path(self.base_path) / "downloads" / slug
+            meta_path = downloads_path / "metadata.json"
+        else:
+            meta_path = downloader.download_folder / slug / "metadata.json"
+        
+        if not meta_path.exists():
+            return {}
+        
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+            return metadata.get("chapters", {})
+        except Exception as e:
+            print(f"⚠️ Ошибка чтения metadata {slug}: {e}")
+            return {}
+
+    def get_chapter_pages_count(self, slug: str, chapter: str, source: str = "manga") -> int:
+        """Возвращает количество страниц в главе из указанного источника"""
+        from pathlib import Path
+        folder = self.manga_path if source == "manga" else "downloads"
+        chapter_path = Path(self.base_path) / folder / slug / chapter
+        
+        if not chapter_path.exists():
+            return 0
+        
+        pages = (list(chapter_path.glob("*.png")) + 
+                list(chapter_path.glob("*.jpg")) + 
+                list(chapter_path.glob("*.jpeg")) +
+                list(chapter_path.glob("*.webp")))
+        return len(pages)
+
