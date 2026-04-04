@@ -42,6 +42,8 @@ def cpu_upscale(
     pil_img = Image.fromarray(cv2.cvtColor(upscaled, cv2.COLOR_BGR2RGB))
     enhancer = ImageEnhance.Contrast(pil_img) 
     pil_img = enhancer.enhance(1.1)
+    sharpener = ImageEnhance.Sharpness(pil_img)
+    pil_img = sharpener.enhance(1.5)
     
     upscaled = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     save_image(upscaled, output_path)

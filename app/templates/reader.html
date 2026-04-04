@@ -7,25 +7,41 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
     <style>
-        /* Ограничиваем размер отображения, но сохраняем качество 4K */
+        [x-cloak] { display: none !important; }
+        
+        /* 🔹 Контейнер на всю ширину */
+        .reader-container {
+            width: 100%;
+            overflow-x: hidden;
+        }
+        
+        /* 🔹 Картинка автоматически подстраивается под ширину экрана */
         .manga-page {
-            max-width: 100%;
-            max-height: 85vh;
-            width: auto;
+            display: block;
+            width: 85%;
+            max-width: 70vw;      /* 🔹 Не шире окна браузера */
             height: auto;
-            object-fit: contain;
-            image-rendering: auto;
+            margin: 0 auto;
+            object-fit: contain;   /* 🔹 Сохраняет пропорции, если высота большая */
         }
         
-        @media (min-width: 1920px) {
-            .manga-page { max-width: 1600px; }
+        /* 🔹 Панель управления */
+        .control-panel {
+            backdrop-filter: blur(10px);
+            background: rgba(31, 41, 55, 0.9);
         }
-        
-        body { background-color: #111827; }
+
+        @media (max-width: 768px) {
+            .manga-page {
+                width: 100vw;
+                max-width: 100vw;
+                padding: 0 4px;  /* 🔹 Небольшой отступ по краям */
+            }
+        }
     </style>
 </head>
 <!-- директивы @keydown.window для обработки клавиш -->
-<body class="text-white" 
+<body class="bg-black text-white" 
       x-data="{ 
           page: 0, 
           total: {{ total_pages }}, 
@@ -80,12 +96,11 @@
     </div>
 
     <!-- Изображение -->
-    <div class="pt-24 pb-10 flex justify-center min-h-screen items-start">
-        <img :src="`/image/{{ slug }}/{{ chapter }}/${page}?quality=${quality}`" 
-             class="manga-page shadow-2xl"
-             :alt="`Страница ${page + 1}`"
-             @load="scrollToTop()"
-             loading="lazy">
+    <div class="pt-24 pb-10 flex justify-center w-full">
+        <img :src="`/image/{{ slug }}/{{ chapter }}/${page}?quality=${quality}`"
+             class="manga-page w-full h-auto"
+             loading="lazy"
+             @load="console.log('Loaded:', $event.target.naturalWidth, 'x', $event.target.naturalHeight)">
     </div>
 
     <!-- Инфо о размере -->

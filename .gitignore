@@ -87,3 +87,4 @@ coverage.xml
 
 # 🔹 Docker (если используется)
 docker-compose.override.yml
+test_downloader.py

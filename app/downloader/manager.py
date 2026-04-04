@@ -364,7 +364,13 @@ class MangaDownloader:
                 
                 # 🔹 Получаем ожидаемое количество (из кэша или дефолт)
                 existing_chapter = existing_meta.get("chapters", {}).get(item.name, {})
-                expected = existing_chapter.get("pages_expected", len(pages) if len(pages) > 0 else 10)
+                old_expected = existing_chapter.get("pages_expected", len(pages))
+
+                # 🔹 Если файлов больше или равно старому expected — обновляем expected
+                if len(pages) >= old_expected and old_expected > 0:
+                    expected = len(pages)  # ✅ Обновляем на актуальное значение
+                else:
+                    expected = old_expected  # Оставляем старое, если данных мало
                 
                 # 🔹 Сохраняем статус главы (обычный dict!)
                 chapters_meta[item.name] = {
