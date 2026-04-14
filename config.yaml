@@ -4,6 +4,33 @@ upscaled_folder: "upscaled"
 host: "0.0.0.0"
 port: 8000
 # Простые улучшения для CPU
+
+data:
+  upscaled_folder: "upscaled"
+
+upscaler:
+  enabled: true
+  method: "ncnn-vulkan"  # "ncnn-vulkan" или "cpu"
+  
+  # ncnn-vulkan параметры
+  ncnn:
+    exe_path: "tools/realesrgan-ncnn-vulkan.exe"
+    models_dir: "tools/models"
+    model_name: "realesr-animevideov3"
+    scale: 2
+    tile: 512
+    gpu_id: 0
+    threads: "4:8:4"
+    output_format: "jpg"
+  
+  # CPU fallback параметры
+  cpu:
+    scale: 2
+    interpolation: "bicubic"  # "bicubic", "lanczos"
+    unsharp_mask: true
+    contrast: 1.1
+    sharpness: 1.5
+
 enhancements:
   sharpen: 0.5       # Резкость (0.0 - 1.0)
   contrast: 1.1      # Контраст (1.0 - 1.5)

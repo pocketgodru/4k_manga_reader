@@ -1,6 +1,6 @@
 """Pydantic модели для downloader"""
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Union
 from datetime import datetime
 from enum import Enum
 from pydantic import field_validator  
@@ -47,14 +47,37 @@ class MangaSearchResult(BaseModel):
         return None
 
 class ChapterInfo(BaseModel):
-    """Информация о главе"""
-    number: int
+    number: Union[int, float]  # 🔹 Может быть 8 или 8.3!
     name: Optional[str] = None
     url: str
     pages_count: int = 0
+    volume: Optional[int] = 1  # 🔹 НОВОЕ: том главы
     downloaded: bool = False
-
-
+    
+    class Config:
+        arbitrary_types_allowed = True
+    
+class StartDownloadRequest(BaseModel):
+    url: str
+    # 🔹 КЛЮЧЕВОЕ: chapters — СТРОКА, а не список!
+    chapters: Optional[str] = None  # ← Было: Optional[List[int]] = None ❌
+    
+    @field_validator('chapters')
+    @classmethod
+    def validate_chapters(cls, v):
+        if v is None or not v.strip():
+            return None
+        # 🔹 Проверяем, что все элементы — числа (целые или дробные)
+        for c in v.split(","):
+            c = c.strip()
+            if c:
+                try:
+                    float(c)  # ✅ Принимает 1, 4.5, 8.1, 8.3
+                except ValueError:
+                    raise ValueError(f"Неверный номер главы: '{c}'")
+        return v.strip()
+    
+    
 class DownloadTask(BaseModel):
     """Задача на скачивание"""
     task_id: str

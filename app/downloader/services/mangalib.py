@@ -192,9 +192,9 @@ class MangaLibService:
             return []
     
     async def get_chapters(self, manga_slug: str) -> List[ChapterInfo]:
-        """📚 Получение списка глав с retry"""
+        """📚 Получение списка глав с retry — с поддержкой дробных номеров"""
+        
         url = f"{API_BASE}manga/{manga_slug}/chapters"
-        #print(url)
         data_bytes = await self._request_with_retry(url)
         if not data_bytes:
             return []
@@ -211,29 +211,43 @@ class MangaLibService:
         
         for i, ch in enumerate(chapters):
             vol = ch.get("volume") or 1
-            num = ch.get("number") or (i + 1)
+            num_raw = ch.get("number")  # 🔹 Сохраняем "как есть": 8, 8.1, 8.3, "7.5"
             
+            # 🔹 Парсим том — всегда целое число
             try:
-                vol = int(vol)
-                num = int(num)
+                vol = int(float(vol))  # "2" → 2, 2.0 → 2
             except (TypeError, ValueError):
-                vol, num = 1, i + 1
+                vol = 1
+            
+            # 🔹 🔹 🔹 Парсим номер главы — МОЖЕТ БЫТЬ ДРОБНЫМ! 🔹 🔹 🔹
+            try:
+                num_float = float(num_raw)  # "8.3" → 8.3, "8" → 8.0
+                # 🔹 Если число целое — храним как int, иначе как float
+                num = int(num_float) if num_float == int(num_float) else num_float
+            except (TypeError, ValueError):
+                # 🔹 Фоллбэк: если не удалось распарсить — используем индекс
+                num = i + 1
+            
+            # 🔹 Формируем строковое представление для URL (канонический вид)
+            num_str = str(int(num_float)) if num_float == int(num_float) else str(num_float).rstrip('0').rstrip('.')
             
             result.append(ChapterInfo(
-                number=int(num) if num == int(num) else i + 1,
-                name=ch.get("name") or f"Том {vol}, Глава {num}",
-                url=f"mangagraph://{manga_slug}/v{vol}c{num}",
-                pages_count=0
+                number=num,  # 🔹 int или float — как нужно для сортировки!
+                name=ch.get("name") or f"Том {vol}, Глава {num_str}",
+                url=f"mangagraph://{manga_slug}/v{vol}c{num_str}",  # 🔹 v2c8.3, а не v2c8
+                pages_count=ch.get("pages_count") or 0,
+                volume=vol  # 🔹 Добавляем том в модель!
             ))
-        
-        return sorted(result, key=lambda x: x.number)
+        #print(sorted(result, key=lambda x: (x.volume or 1, float(x.number))))
+        # 🔹 Сортировка: по тому, затем по номеру (численно!)
+        return sorted(result, key=lambda x: (x.volume or 1, x.number))
     
     async def get_page_urls(self, manga_slug: str, volume: int, chapter: str) -> List[str]:
         """🖼️ Получение ссылок на изображения с retry"""
         #print(chapter)
         ch = int(chapter) if chapter == str(chapter) else chapter
         url = f"{API_BASE}manga/{manga_slug}/chapter"
-        params = {"number": int(ch), "volume": volume}
+        params = {"number": ch, "volume": volume}
         #print(params)
         data_bytes = await self._request_with_retry(url, params=params)
         if not data_bytes:

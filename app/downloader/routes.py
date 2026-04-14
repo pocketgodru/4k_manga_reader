@@ -1,11 +1,13 @@
 """API routes для downloader"""
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
+from typing import Optional, List, Union
 
 from .manager import MangaDownloader
 from .models import DownloadStatus
+from .models import StartDownloadRequest
 
 router = APIRouter(prefix="/download", tags=["Downloader"])
 
@@ -17,20 +19,30 @@ class SearchResponse(BaseModel):
     results: List[dict]
 
 
-class StartDownloadRequest(BaseModel):
-    url: str
-    chapters: Optional[str] = None  # "1,2,5" или null
-
-
 class TaskStatusResponse(BaseModel):
     task_id: str
-    status: str
-    progress: float
-    current_chapter: Optional[int]
-    current_page: Optional[int]
-    total_chapters: int
-    downloaded_chapters: List[int]
-    errors: List[str]
+    status: str  # "running", "completed", "error", "cancelled"
+    progress: float = 0.0  # 0-100%
+    
+    # 🔹 🔹 🔹 ИСПРАВЛЕНО: принимаем int И float для номеров глав 🔹 🔹 🔹
+    current_chapter: Optional[Union[int, float, str]] = None  # ← Было: Optional[int]
+    
+    current_page: Optional[int] = None
+    total_chapters: Optional[int] = None
+    total_pages: Optional[int] = None
+    
+    # 🔹 🔹 🔹 ИСПРАВЛЕНО: список может содержать дробные номера 🔹 🔹 🔹
+    downloaded_chapters: List[Union[int, float, str]] = Field(default_factory=list)  # ← Было: List[int]
+    
+    errors: List[str] = Field(default_factory=list)
+    
+    # 🔹 Дополнительная информация
+    manga_slug: Optional[str] = None
+    manga_title: Optional[str] = None
+    
+    class Config:
+        # 🔹 Разрешаем произвольные типы для совместимости
+        arbitrary_types_allowed = True
 
 
 @router.get("/search", response_model=SearchResponse)
@@ -43,32 +55,36 @@ async def search_manga(q: str, limit: int = 10):
     return {"results": [r.model_dump() for r in results]}
 
 
-@router.post("/start/{manga_slug}")
+@router.post("/download/start/{manga_slug}")
 async def start_download(
-    manga_slug: str,
+    manga_slug: str, 
     request: StartDownloadRequest,
     background_tasks: BackgroundTasks
 ):
-    """Запускает скачивание в фоне"""
-    if not downloader:
-        raise HTTPException(status_code=500, detail="Downloader not initialized")
-    
     chapter_list = None
+
+    
     if request.chapters:
-        try:
-            chapter_list = [int(c.strip()) for c in request.chapters.split(",")]
-        except:
-            raise HTTPException(status_code=400, detail="Неверный формат глав")
+
+            chapter_list = []
+            # 🔹 request.chapters — это строка "4.5,8.1,8.3"
+            for c in request.chapters.split(","):
+                c = c.strip()
+                if not c:
+                    continue
+                num = float(c)
+                # 🔹 Целые числа храним как int, дробные — как float
+                chapter_list.append(int(num) if num == int(num) else num)
+
     
     task_id = f"dl_{manga_slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    # 🔹 Запуск в фоне
     background_tasks.add_task(
         downloader.download_manga_smart,
         manga_slug,
         request.url,
-        manga_slug,  # title (можно улучшить)
-        chapter_list,
+        manga_slug,
+        chapter_list,  # 🔹 Теперь может содержать float!
         task_id
     )
     

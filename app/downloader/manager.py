@@ -20,6 +20,26 @@ BETWEEN_REQUESTS_DELAY = 0.5
 BETWEEN_PAGES_DELAY = BETWEEN_REQUESTS_DELAY # Пауза между страницами
 BETWEEN_CHAPTERS_DELAY = 2.0  # Пауза между главами
 
+
+# 🔹 Нормализация номера главы — ВСЕГДА как строка
+def normalize_chapter_number(chap_str: str) -> str:
+    """
+    Приводит номер главы к каноническому виду:
+    '8.3' → '8.3'
+    '8.0' → '8'
+    '8.30' → '8.3'
+    '0' → '0' (для пролога)
+    """
+    try:
+        num = float(chap_str)
+        if num == int(num):
+            return str(int(num))  # "8.0" → "8"
+        else:
+            # Убираем лишние нули: "8.30" → "8.3"
+            return f"{num:.10f}".rstrip('0').rstrip('.')
+    except (ValueError, TypeError):
+        return str(chap_str).strip()
+
 class MangaDownloader:
     def __init__(self, data_path: str, manga_folder: str = "manga"):
         self.data_path = Path(data_path).resolve()
@@ -68,7 +88,12 @@ class MangaDownloader:
             
             # 🔹 2. Фильтруем запрошенные главы
             if chapters:
-                to_process = [c for c in available_chapters if c.number in chapters]
+                to_process = []
+                for c in available_chapters:
+                    # 🔹 Нормализуем номер главы для сравнения
+                    ch_num = float(c.number) if isinstance(c.number, (int, float)) else None
+                    if ch_num is not None and any(float(req) == ch_num for req in chapters):
+                        to_process.append(c)
             else:
                 to_process = available_chapters
             
@@ -138,7 +163,9 @@ class MangaDownloader:
         try:
             # 🔹 1. Сначала ищем УЖЕ СУЩЕСТВУЮЩУЮ папку на диске
             # Парсим номер главы из задачи (ch.number = 384)
-            target_chapter_num = int(chapter.number) if chapter.number == int(chapter.number) else chapter.number
+            target_volume = chapter.volume if hasattr(chapter, 'volume') and chapter.volume else 1
+            target_chapter_raw = str(chapter.number).strip()
+            target_chapter_norm = normalize_chapter_number(target_chapter_raw)
             
             found_chapter_name = None
             found_volume = None
@@ -148,17 +175,18 @@ class MangaDownloader:
             for item in manga_dir.iterdir():
                 if item.is_dir() and not item.name.startswith('.'):
                     # 🔹 Парсим имя: v{vol}c{num}
-                    match = re.match(r'^v(\d+)c(\d+(?:\.\d+)?)$', item.name)
+                    match = re.match(r'^v(\d+)c([\d.]+)$', item.name)
                     if match:
                         vol = int(match.group(1))
-                        chap_str = match.group(2)  # "130", "7.5", "3680"
-                        chap_num = float(chap_str)
+                        chap_str = match.group(2)  # "130", "7.5", "8.3"
+                        chap_norm = normalize_chapter_number(chap_str)
                         
-                        # 🔹 Если номер главы совпадает — это наша папка!
-                        if chap_num == target_chapter_num:
+                        # 🔹 🔹 🔹 СРАВНЕНИЕ КАК СТРОКИ (не float!) 🔹 🔹 🔹
+                        if vol == target_volume and chap_norm == target_chapter_norm:
                             found_chapter_name = item.name
                             found_volume = vol
                             found_chap_str = chap_str
+                            logger.debug(f"🔍 Найдена папка: {item.name} (vol={vol}, chap={chap_str} → {chap_norm})")
                             break
             
             # 🔹 2. Если нашли папку — проверяем, скачана ли она

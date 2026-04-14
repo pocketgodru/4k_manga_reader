@@ -5,6 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ metadata.title }}</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .calibrating {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+    </style>
 </head>
 <body class="bg-gray-900 text-white min-h-screen">
     <div class="container mx-auto p-6">
@@ -32,17 +41,31 @@
                 <div id="progress" class="hidden bg-gray-800 rounded p-4 mb-4">
                     <div class="flex justify-between items-center mb-2">
                         <div class="text-sm text-gray-400">Прогресс: <span id="progress-status">Ожидание...</span></div>
-                        <!-- 🔹 Кнопка Стоп -->
                         <button id="stop-btn" onclick="stopUpscale('{{ slug }}')" 
                                 class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-xs transition hidden">
                             ⏹️ Стоп
                         </button>
                     </div>
+                    
                     <div class="w-full bg-gray-700 rounded-full h-4">
                         <div id="progress-bar" class="bg-orange-500 h-4 rounded-full transition-all duration-300" style="width: 0%"></div>
                     </div>
-                    <div id="progress-text" class="text-xs mt-2 text-gray-400">0 / 0 страниц</div>
+                    
+                    <div id="progress-text" class="text-xs mt-2 text-gray-400">0 / 0 глав</div>
+                    
+                    <!-- ✅ Скорость и ETA -->
+                    <div class="flex justify-between text-xs mt-1">
+                        <span id="progress-speed" class="text-green-400"></span>
+                        <span id="progress-eta" class="text-blue-400 font-medium"></span>
+                    </div>
+                    
+                    <!-- ✅ Текущая глава (ОДИН раз, не дублировать!) -->
                     <div id="progress-chapter" class="text-xs mt-1 text-blue-400"></div>
+                    
+                    <!-- ✅ Статистика: готовые / ожидающие (опционально) -->
+                    <div class="text-xs text-gray-500 mt-1">
+                        ✅ Готово: <span id="ready-count">0</span> | ⏳ Ожидает: <span id="pending-count">0</span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -137,12 +160,67 @@
         }
     };
 
+    // 🔹 Форматирует секунды в человекочитаемый вид
+    function formatDuration(seconds) {
+        if (seconds === null || seconds === undefined || seconds < 0) return '—';
+        if (seconds < 60) return `~${Math.round(seconds)} сек`;
+        if (seconds < 3600) return `~${Math.round(seconds / 60)} мин`;
+        const hours = seconds / 3600;
+        if (hours < 24) return `~${hours.toFixed(1)} ч`;
+        return `~${Math.round(hours / 24)} дн`;
+    }
+
+    async function initUpscaleProgress(slug) {
+        try {
+            // 🔹 1. Запрашиваем детальный статус
+            const res = await fetch(`/upscale/status-by-chapters/${slug}`);
+            const status = await res.json();
+            
+            // 🔹 2. Обновляем UI — ПРАВИЛЬНЫЕ ID (без префикса upscale-)
+            const progressBar = document.getElementById('progress-bar');      // ✅ Было: 'upscale-progress-bar'
+            const progressText = document.getElementById('progress-text');    // ✅ Было: 'upscale-progress-text'
+            const readyCount = document.getElementById('ready-count');        // ✅ Было: 'upscale-ready-count'
+            const pendingCount = document.getElementById('pending-count');    // ✅ Было: 'upscale-pending-count'
+            
+            if (progressBar) {
+                progressBar.style.width = `${status.progress_percent}%`;
+            }
+            if (progressText) {
+                progressText.textContent = `${status.ready_count} / ${status.total} глав`;
+            }
+            if (readyCount) {
+                readyCount.textContent = status.ready_count;
+            }
+            if (pendingCount) {
+                pendingCount.textContent = status.pending_count;
+            }
+            
+            // 🔹 3. Если есть активная задача — запускаем polling
+            if (status.pending_count > 0) {
+                const activeRes = await fetch(`/upscale/active/${slug}`);
+                const active = await activeRes.json();
+                
+                if (active.active) {
+                    // 🔹 Обновляем прогресс-бар если он скрыт
+                    const progress = document.getElementById('progress');
+                    if (progress && progress.classList.contains('hidden')) {
+                        progress.classList.remove('hidden');
+                    }
+                    initUpscalePolling(slug, active.task_id);  // 🔹 Передаём task_id сразу
+                }
+            }
+            
+        } catch (e) {
+            console.error('Ошибка загрузки статуса апскейла:', e);
+        }
+    }
+
     // Запуск polling с проверкой активной задачи
     async function initUpscalePolling(slug) {
         const progress = document.getElementById('progress');
         const bar = document.getElementById('progress-bar');
         const text = document.getElementById('progress-text');
-        const status = document.getElementById('progress-status');
+        const statusEl = document.getElementById('progress-status');
         const stopBtn = document.getElementById('stop-btn');
         const chapter = document.getElementById('progress-chapter');
         const btn = document.getElementById('upscale-all-btn');
@@ -168,6 +246,7 @@
 
         
         // 4. Запускаем polling
+        // 🔹 Обновлённая функция poll — ПРОГРЕСС ПО ГЛАВАМ
         const poll = async () => {
             try {
                 const res = await fetch(`/upscale/status/${taskId}`);
@@ -177,61 +256,103 @@
                     console.warn('⚠️ Задача не найдена на сервере. Сброс...');
                     clearInterval(window.upscalePollingInterval);
                     ProgressManager.clear(slug);
-                    status.textContent = '❌ Сессия утеряна (сервер перезагружен?)';
+                    statusEl.textContent = '❌ Сессия утеряна';
                     bar.classList.replace('bg-orange-500', 'bg-red-500');
                     return;
                 }
                 
                 const data = await res.json();
 
-                
-                if (data.already_upscaled > 0) {
-                    status.textContent = `✓ ${data.already_upscaled} страниц уже готовы`;
-                }
-
+                // 🔹 Кнопка Стоп: показываем только при running
                 if (data.status === 'running') {
                     stopBtn.classList.remove('hidden');
                 } else {
                     stopBtn.classList.add('hidden');
                 }
 
-                // Обработка отмены
+                // 🔹 Обработка отмены
                 if (data.status === 'cancelled') {
                     clearInterval(window.upscalePollingInterval);
                     ProgressManager.clear(slug);
-                    status.textContent = '⏹️ Остановлено пользователем';
+                    statusEl.textContent = '⏹️ Остановлено';
                     bar.classList.replace('bg-orange-500', 'bg-red-500');
                     stopBtn.classList.add('hidden');
                     return;
                 }
 
+                // 🔹 ГЛАВНОЕ ИЗМЕНЕНИЕ: используем поля по главам
+                const completed = data.completed_chapters ?? data.processed ?? 0;
+                const total = data.total_chapters ?? data.total ?? 1;
+                
                 // Показываем "Подсчёт..." пока total не определён
-                if (data.total === -1) {
-                    status.textContent = '🔍 Подсчёт страниц...';
+                if (total === -1 || data.status === 'pending') {
+                    statusEl.textContent = '🔍 Подсчёт глав...';
                     bar.style.width = '0%';
                     text.textContent = 'Ожидание...';
                 } else {
-                    const percent = Math.min(100, (data.processed / Math.max(data.total, 1)) * 100);
+                    // 🔹 Процент по главам
+                    const percent = Math.min(100, (completed / Math.max(total, 1)) * 100);
                     bar.style.width = percent + '%';
-                    text.textContent = `${data.processed} / ${data.total} новых страниц`;
-                    status.textContent = data.status === 'running' ? 'Обработка...' : 'Завершение...';
+                    
+                    // 🔹 Текст: "15 / 390 глав" вместо "150 / 5000 страниц"
+                    text.textContent = `${completed} / ${total} глав`;
+                    statusEl.textContent = data.status === 'running' ? 'Обработка...' : 'Завершение...';
                 }
                 
+                // 🔹 Текущая глава
                 chapter.textContent = data.current_chapter ? `📖 ${data.current_chapter}` : '';
                 
-                if (data.status === 'completed') {
+                const speedEl = document.getElementById('progress-speed');
+                const etaEl = document.getElementById('progress-eta');
+
+                const elapsed = data.elapsed_sec ?? 0;
+
+                if (speedEl) {
+                    if (data.chapters_per_min) {
+                        speedEl.textContent = `⚡ ${data.chapters_per_min} глав/мин`;
+                        speedEl.classList.remove('calibrating');
+                    } else if (elapsed < 10) {
+                        // 🔹 Используем elapsed, а не elapsed_sec!
+                        speedEl.textContent = '⏱ Калибровка...';
+                        speedEl.classList.add('calibrating');
+                    } else {
+                        speedEl.textContent = '';
+                        speedEl.classList.remove('calibrating');
+                    }
+                }
+                // 🔹 ETA: показываем только когда есть оценка и задача ещё идёт
+                if (data.eta_sec !== null && data.eta_sec !== undefined && data.status === 'running') {
+                    etaEl.textContent = `🕐 Осталось: ${formatDuration(data.eta_sec)}`;
+                } else if (data.status === 'completed') {
+                    etaEl.textContent = '✅ Готово!';
+                } else {
+                    etaEl.textContent = '';
+                }
+
+                // 🔹 Завершение
+                if (['completed', 'partial', 'error'].includes(data.status)) {
                     clearInterval(window.upscalePollingInterval);
                     ProgressManager.clear(slug);
-                    status.textContent = 'Готово! ✓';
-                    bar.classList.replace('bg-orange-500', 'bg-green-500');
-                    setTimeout(() => location.reload(), 1500);
+                    
+                    if (data.status === 'completed') {
+                        statusEl.textContent = '✅ Все главы апскейлены!';
+                        bar.classList.replace('bg-orange-500', 'bg-green-500');
+                        setTimeout(() => location.reload(), 1500);
+                    } else if (data.status === 'partial') {
+                        statusEl.textContent = `⚠️ Завершено с ошибками (${completed}/${total})`;
+                        bar.classList.replace('bg-orange-500', 'bg-yellow-500');
+                    } else {
+                        statusEl.textContent = '❌ Ошибка';
+                        bar.classList.replace('bg-orange-500', 'bg-red-500');
+                    }
+                    stopBtn.classList.add('hidden');
                     return;
                 }
             } catch (e) {
                 console.error('Polling error:', e);
             }
         };
-        
+                
         // Первый вызов + интервал
         poll();
         window.upscalePollingInterval = setInterval(poll, 1000);
@@ -264,27 +385,32 @@
         const bar = document.getElementById('progress-bar');
         const text = document.getElementById('progress-text');
         const status = document.getElementById('progress-status');
-        const chapter = document.getElementById('progress-chapter');
         
         btn.disabled = true;
         btn.textContent = '⏳ Запуск...';
         progress.classList.remove('hidden');
         
+        // 🔹 Сброс визуала перед стартом
+        bar.style.width = '0%';
+        bar.className = 'bg-orange-500 h-4 rounded-full transition-all duration-300';
+        text.textContent = '0 / 0 глав';
+        status.textContent = 'Запуск...';
+        
         try {
-            // Запускаем задачу
             const res = await fetch(`/upscale/all/${slug}`, { method: 'POST' });
             const data = await res.json();
             
             if (data.status === 'ok' && data.task_id) {
-                // ✅ Сохраняем task_id для восстановления после навигации
                 ProgressManager.save(slug, data.task_id);
-                initUpscalePolling(slug); // Сразу запускаем отображение
+                initUpscalePolling(slug);
+            } else {
+                throw new Error(data.detail || 'Неизвестная ошибка');
             }
-            
         } catch (e) {
             btn.disabled = false;
             btn.textContent = '🚀 Апскейл всех глав (4K)';
-            status.textContent = 'Ошибка: ' + e.message;
+            status.textContent = '❌ Ошибка: ' + e.message;
+            progress.classList.add('hidden');
         }
     }
     
@@ -346,7 +472,7 @@
     document.addEventListener('DOMContentLoaded', () => {
         const slug = '{{ slug }}'; // Jinja переменная
         if (slug) {
-            initUpscalePolling(slug);
+            initUpscaleProgress(slug);
         }
     });
     </script>

@@ -14,14 +14,28 @@ import tempfile
 from tqdm import tqdm
 import logging as logging
 import atexit
+from typing import Dict
+
+
+
+# 🔹 В САМОЕ НАЧАЛО main.py, ДО импорта asyncio/uvicorn:
+
+import sys
+import asyncio
+
+# 🔹 Для Windows: устанавливаем ProactorEventLoop для поддержки subprocess
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 
 
 from app.downloader.manager import MangaDownloader
-from app.downloader.routes import StartDownloadRequest, router as downloader_router
+from app.downloader.routes import router as downloader_router
+from app.downloader.models import StartDownloadRequest
 from app.downloader.routes import downloader
 from app.reader import MangaReader
-from app.enhancer import enhance_for_display, cpu_upscale
 
+from app.enhancer import UpscalerEngine, enhance_for_display
 # Загрузка конфига
 with open("config.yaml", 'r', encoding='utf-8') as f:
     config = yaml.safe_load(f)
@@ -48,6 +62,13 @@ reader = MangaReader(
 downloader = MangaDownloader(
     data_path=reader.base_path,  # ✅ Используем путь из reader
 )
+
+
+upscaler = UpscalerEngine(config)
+
+# 🔹 Глобальное хранилище задач апскейла
+upscale_tasks: Dict[str, dict] = {}
+
 
 # Подключаем роуты downloader
 app.include_router(downloader_router)
@@ -115,13 +136,27 @@ async def get_chapters_list(manga_slug: str):
         await service.close()
 
 @app.post("/download/start/{manga_slug}")
-async def start_download(manga_slug: str, request: StartDownloadRequest, background_tasks: BackgroundTasks):
+async def start_download(
+    manga_slug: str, 
+    request: StartDownloadRequest,
+    background_tasks: BackgroundTasks
+):
     chapter_list = None
+    logger.info(request)
+    logger.info(request.chapters)
+    
     if request.chapters:
-        try:
-            chapter_list = [int(c.strip()) for c in request.chapters.split(",")]
-        except:
-            raise HTTPException(status_code=400, detail="Неверный формат глав")
+
+            chapter_list = []
+            # 🔹 request.chapters — это строка "4.5,8.1,8.3"
+            for c in request.chapters.split(","):
+                c = c.strip()
+                if not c:
+                    continue
+                num = float(c)
+                # 🔹 Целые числа храним как int, дробные — как float
+                chapter_list.append(int(num) if num == int(num) else num)
+
     
     task_id = f"dl_{manga_slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
@@ -130,7 +165,7 @@ async def start_download(manga_slug: str, request: StartDownloadRequest, backgro
         manga_slug,
         request.url,
         manga_slug,
-        chapter_list,
+        chapter_list,  # 🔹 Теперь может содержать float!
         task_id
     )
     
@@ -219,48 +254,40 @@ async def serve_image(
     slug: str, 
     chapter: str, 
     page_idx: int, 
-    quality: str = "manga",
-    upscale: bool = False
+    quality: str = "manga"
 ):
+    """🔹 Раздача изображений — с обработкой str/Path"""
+    from pathlib import Path
+    
+    # 🔹 Получаем путь (может быть str или Path)
     page_path = reader.get_page_path(slug, chapter, page_idx, quality)
-    if not page_path or not os.path.exists(page_path):
+    
+    # 🔹 Приводим к Path для надёжности
+    page_path = Path(page_path) if page_path else None
+    
+    # 🔹 Проверка существования
+    if not page_path or not page_path.exists():
+        logger.warning(f"⚠️ Изображение не найдено: {page_path}")
         raise HTTPException(status_code=404, detail="Изображение не найдено")
     
-    if upscale:
-        upscaled_path = reader.get_page_path(slug, chapter, page_idx, quality="upscaled")
-        if upscaled_path and os.path.exists(upscaled_path):
-            with open(upscaled_path, 'rb') as f:
-                return Response(content=f.read(), media_type="image/png")
-        
-        buf = io.BytesIO()
-        img = Image.open(page_path)
-        img.save(buf, format='PNG')
-        buf.seek(0)
-        
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_in:
-            tmp_in.write(buf.getvalue())
-            tmp_in_path = tmp_in.name
-        
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_out:
-            tmp_out_path = tmp_out.name
-        
-        try:
-            cpu_upscale(tmp_in_path, tmp_out_path, scale=2)
-            with open(tmp_out_path, 'rb') as f:
-                response_data = f.read()
-            return Response(content=response_data, media_type="image/png")
-        finally:
-            os.unlink(tmp_in_path)
-            os.unlink(tmp_out_path)
-    else:
-        img = Image.open(page_path)
-        img = enhance_for_display(img, config.get('enhancements', {}))
-        
-        buf = io.BytesIO()
-        img.save(buf, format='JPEG', quality=90, optimize=True)
-        buf.seek(0)
-        
-        return Response(content=buf.getvalue(), media_type="image/jpeg")
+    # 🔹 Отдаём файл
+    from fastapi.responses import FileResponse
+    
+    # 🔹 Определяем MIME-тип
+    suffix = page_path.suffix.lower()
+    media_type = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.webp': 'image/webp',
+        '.gif': 'image/gif'
+    }.get(suffix, 'image/jpeg')
+    
+    return FileResponse(
+        str(page_path),
+        media_type=media_type,
+        headers={'Cache-Control': 'public, max-age=31536000'}
+    )
 
 @app.get("/api/manga/list")
 async def api_manga_list():
@@ -319,77 +346,82 @@ def cleanup_resources():
     except:
         pass
 
-# Функция апскейла (выносится в отдельный метод)
-def _run_upscale_sync(slug: str, scale: int, task_id: str, chapters: list, chapter_pages: dict, config: dict, reader):
-    from pathlib import Path
-    from tqdm import tqdm
-    from app.enhancer import cpu_upscale
-    import re
+def _update_progress(task_id: str, done: int, total: int, chapter: str, result: dict):
+    """🔹 Коллбэк для обновления прогресса"""
+    if task_id in upscale_tasks:
+        upscale_tasks[task_id].update({
+            "current_chapter": chapter,
+            "processed": done,
+            "total": total,
+            "last_result": result
+        })
+
+@app.get("/upscale/method")
+async def get_upscale_method():
+    """🔹 Возвращает текущий метод апскейла и его доступность"""
+    return {
+        "method": upscaler.method,
+        "ncnn_available": upscaler.ncnn_available,
+        "scale": upscaler.scale,
+        "gpu_id": upscaler.gpu_id,
+        "output_format": upscaler.output_format
+    }
+
+@app.get("/upscale/status-by-chapters/{slug}")
+async def get_upscale_status_by_chapters(slug: str, chapters: str = None):
+    """
+    🔹 Возвращает детальный статус по каждой главе
+    🔹 ?chapters=v1c1,v2c8.1,v2c8.2 — опционально фильтр
+    """
+    chapter_list = None
+    if chapters:
+        chapter_list = [c.strip() for c in chapters.split(",") if c.strip()]
     
-    # ...   подсчёт pages_to_process  ...
-    pages_to_process = []
-    for chapter in chapters:
-        upscaled_dir = Path(config['data_path']) / config['upscaled_folder'] / slug / chapter
-        upscaled_dir.mkdir(parents=True, exist_ok=True)
-        for page_path in chapter_pages[chapter]:
-            original_name = Path(page_path).name
-            clean_name = re.sub(r'(_4k|_upscaled|_x2|_2x)$', '', original_name, flags=re.IGNORECASE)
-            output_path = upscaled_dir / clean_name
-            if not output_path.exists():
-                pages_to_process.append((chapter, page_path, output_path))
-    
-    total_to_process = len(pages_to_process)
-    processed_total = 0
-    
-    with tqdm(total=total_to_process, desc=f"🚀 Апскейл {slug}", unit="стр", colour="green") as pbar:
-        for chapter, page_path, output_path in pages_to_process:
-            # 🔹 НОВОЕ: Проверка флага отмены перед каждой страницей
-            if upscale_tasks.get(task_id, {}).get("cancel_requested", False):
-                logger.info(f"⏹️ Апскейл остановлен пользователем на {chapter}")
-                upscale_tasks[task_id]["status"] = "cancelled"
-                break  # 🔹 Выход из цикла
-            
-            upscale_tasks[task_id]["current_chapter"] = chapter
-            
-            try:
-                cpu_upscale(page_path, output_path, scale=scale)
-                processed_total += 1
-                pbar.update(1)
-                upscale_tasks[task_id]["processed"] = processed_total
-                upscale_tasks[task_id]["total"] = total_to_process
-            except Exception as e:
-                print(f"❌ Ошибка апскейла {page_path}: {e}")
-                pbar.update(1)
-    
-    # 🔹 НОВОЕ: Если не отменено - помечаем как завершено
-    if upscale_tasks[task_id]["status"] != "cancelled":
-        upscale_tasks[task_id]["status"] = "completed"
-    # Генерация metadata...
-    try:
-        upscaled_meta = reader.create_upscaled_metadata(slug)
-        upscaled_meta['upscale_info']['generated_at'] = datetime.now().isoformat()
-        reader.save_metadata(slug, upscaled_meta, source="upscaled")
-    except Exception as e:
-        print(f"Ошибка сохранения meta: {e}")
-    
-    upscale_tasks[task_id]["status"] = "completed"
+    status = await upscaler.get_upscale_status(slug, chapter_list)
+    return status
 
 # Endpoint для polling прогресса
 @app.get("/upscale/status/{task_id}")
 async def get_upscale_task_status(task_id: str):
-    # 🔹 ЛОГ: Фиксируем запрос статуса
+    """🔹 Статус задачи + ETA"""
+    
     if task_id not in upscale_tasks:
-        logger.error(f"❌ Задача не найдена: {task_id}. Доступные: {list(upscale_tasks.keys())}")
-        raise HTTPException(status_code=404, detail="Задача не найдена (возможно, сервер перезагружен)")
+        raise HTTPException(status_code=404, detail="Задача не найдена")
     
     task = upscale_tasks[task_id]
+    
+    total = task.get("total_chapters", task.get("total", 1))
+    completed = task.get("completed_chapters", task.get("processed", 0))
+    
+    # 🔹 Расчёт времени
+    started_at = task.get("started_at")  # ISO-строка
+    elapsed_sec = 0
+    eta_sec = None
+    chapters_per_min = None
+    
+    if started_at:
+        from datetime import datetime
+        start_dt = datetime.fromisoformat(started_at)
+        elapsed_sec = (datetime.now() - start_dt).total_seconds()
+        
+        # 🔹 Скорость: глав в минуту
+        if completed > 0 and elapsed_sec > 0:
+            chapters_per_min = round((completed / elapsed_sec) * 60, 2)
+            remaining = max(0, total - completed)
+            eta_sec = int((remaining / max(chapters_per_min, 0.01)) * 60)
+    
     return {
         "task_id": task_id,
         "status": task.get("status", "pending"),
-        "processed": task.get("processed", 0),
-        "total": task.get("total", 1),
+        "completed_chapters": completed,
+        "total_chapters": total,
         "current_chapter": task.get("current_chapter", ""),
-        "progress": round((task.get("processed", 0) / max(task.get("total", 1), 1)) * 100, 2)
+        "progress": round((completed / max(total, 1)) * 100, 1),
+        # 🔹 Новые поля для ETA:
+        "elapsed_sec": round(elapsed_sec, 1),
+        "chapters_per_min": chapters_per_min,
+        "eta_sec": eta_sec,  # ← Это используем на фронтенде
+        "method": task.get("method", upscaler.method)
     }
 
 @app.get("/upscale/active/{slug}")
@@ -410,99 +442,127 @@ async def get_active_upscale_task(slug: str):
 # Эндпоинт для отмены задачи
 @app.post("/upscale/cancel/{task_id}")
 async def cancel_upscale_task(task_id: str):
+    """🔹 Отмена задачи — устанавливаем флаг в upscaler"""
+    
     if task_id not in upscale_tasks:
         raise HTTPException(status_code=404, detail="Задача не найдена")
     
-    upscale_tasks[task_id]["status"] = "cancelled"
-    upscale_tasks[task_id]["cancel_requested"] = True  # Флаг остановки
+    # 🔹 1. Обновляем статус в глобальном хранилище
+    upscale_tasks[task_id]["status"] = "cancelling"  # 🔹 Промежуточный статус
+    upscale_tasks[task_id]["cancel_requested"] = True
+    
+    # 🔹 2. 🔥 УСТАНАВЛИВАЕМ ФЛАГ В UPSCALER 🔥
+    upscaler.set_cancel_flag(task_id, True)
     
     logger.info(f"⏹️ Запрошена отмена задачи: {task_id}")
+    
     return {"status": "ok", "message": "Отмена запрошена"}
 
 @app.post("/upscale/all/{slug}")
-async def trigger_upscale_all(slug: str, background_tasks: BackgroundTasks, scale: int = 2):
-    chapters = reader.get_chapters(slug, source="manga")
-    if not chapters:
-        raise HTTPException(status_code=404, detail="Манга не найдена")
+async def trigger_upscale_all(slug: str, background_tasks: BackgroundTasks):
+    """🔹 Массовый апскейл — с корректным начальным прогрессом"""
     
-    # 🔹 НОВОЕ: Собираем страницы для проверки (но не считаем total здесь)
-    chapter_pages = {}
-    for chapter in chapters:
-        chapter_pages[chapter] = reader.get_pages(slug, chapter, quality="manga")
+    # 🔹 1. Сначала проверяем, что уже готово
+    initial_status = await upscaler.get_upscale_status(slug)
     
-    task_id = f"{slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    ready_count = initial_status["ready_count"]
+    total = initial_status["total"]
+    to_process = initial_status["pending_count"]
     
-    # 🔹 ЛОГ: Фиксируем создание задачи
-    logger.info(f"🚀 Создаю задачу: {task_id}")
-
-    # 🔹 НОВОЕ: Инициализируем с placeholder, реальные значения установит воркер
+    # 🔹 Если всё уже готово — сразу возвращаем успех
+    if to_process == 0:
+        return {
+            "status": "ok",
+            "message": "Все главы уже апскейлены",
+            "ready": ready_count,
+            "total": total,
+            "skipped": total
+        }
+    
+    task_id = f"up_{slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    # 🔹 2. Инициализируем задачу с УЧЁТОМ уже готовых глав
     upscale_tasks[task_id] = {
         "status": "running",
-        "processed": 0,
-        "total": -1,  # 🔹 Будет обновлено воркером после подсчёта
+        "completed_chapters": ready_count,  # 🔹 Начинаем с уже готовых!
+        "total_chapters": total,
+        "skipped_chapters": ready_count,    # 🔹 Для статистики
         "current_chapter": "",
-        "slug": slug
+        "slug": slug,
+        "started_at": datetime.now().isoformat(),
+        "cancel_requested": False,
+        "method": upscaler.method
     }
     
-    background_tasks.add_task(
-        asyncio.to_thread,
-        _run_upscale_sync,
-        slug, scale, task_id, chapters, chapter_pages, config, reader
-    )
+    # 🔹 3. Получаем список глав для обработки (только pending)
+    chapters_to_process = [ch["chapter"] for ch in initial_status["pending"]]
     
-    already_done = 0
-    for chapter in chapters:
-        upscaled_dir = Path(config['data_path']) / config['upscaled_folder'] / slug / chapter
-        already_done += sum(1 for p in chapter_pages[chapter] 
-                        if (upscaled_dir / Path(p).name).exists())
-
+    async def run_batch():
+        async def on_progress(completed: int, total: int, chapter: str, status: str, skipped: bool = False):
+            if task_id in upscale_tasks:
+                upscale_tasks[task_id].update({
+                    "completed_chapters": completed,  # 🔹 Уже включает готовые + обработанные
+                    "total_chapters": total,
+                    "current_chapter": chapter,
+                    "last_status": status
+                })
+        
+        result = await upscaler.upscale_manga(
+            slug=slug,
+            task_id=task_id,
+            chapters=chapters_to_process,  # 🔹 Только те, что нужно!
+            progress_callback=on_progress
+        )
+        if task_id in upscale_tasks:
+            upscale_tasks[task_id].update({
+                "status": result.get("status", "completed"),
+                "completed_chapters": result["processed"],
+                "total_chapters": result["total"]
+            })
+    
+    background_tasks.add_task(lambda: asyncio.run(run_batch()))
+    
     return {
-        "status": "ok", 
-        "task_id": task_id, 
-        "already_upscaled": already_done,  # 🔹 Для отображения на фронтенде
-        "message": f"Найдено {already_done} уже готовых страниц"
+        "status": "ok",
+        "task_id": task_id,
+        "total_chapters": total,
+        "already_ready": ready_count,      # 🔹 Для фронтенда
+        "to_process": to_process,          # 🔹 Сколько реально обрабатывать
+        "initial_progress": initial_status["progress_percent"],  # 🔹 Начальный %
+        "message": f"Найдено {ready_count} готовых глав. Обработка {to_process} глав..."
     }
 
 @app.post("/upscale/{slug}/{chapter}")
 async def trigger_upscale(slug: str, chapter: str, scale: int = 2):
-    """Апскейл одной главы с tqdm"""
+    """🔹 Апскейл одной главы"""
+    
     pages = reader.get_pages(slug, chapter, quality="manga")
     if not pages:
         raise HTTPException(status_code=404, detail="Глава не найдена")
     
-    upscaled_dir = Path(config['data_path']) / config['upscaled_folder'] / slug / chapter
-    upscaled_dir.mkdir(parents=True, exist_ok=True)
+    # 🔹 Запускаем апскейл
+    result = await upscaler.upscale_chapter(slug, chapter)
     
-    processed = 0
-    skipped = 0
-    
-    # ✅ tqdm для одной главы
-    with tqdm(total=len(pages), desc=f"📖 Апскейл {chapter}", unit="стр", colour="cyan") as pbar:
-        for page_path in pages:
-            page_name = Path(page_path).name
-            output_path = upscaled_dir / page_name
-            
-            if output_path.exists():
-                skipped += 1
-                pbar.update(1)
-                continue
-            
-            try:
-                cpu_upscale(page_path, output_path, scale=scale)
-                processed += 1
-                pbar.update(1)
-            except Exception as e:
-                print(f"❌ Ошибка апскейла {page_path}: {e}")
-                pbar.update(1)
-    
+    # 🔹 Обновляем метаданные
     try:
         upscaled_meta = reader.create_upscaled_metadata(slug)
-        upscaled_meta['upscale_info']['generated_at'] = datetime.now().isoformat()
+        upscaled_meta['upscale_info'] = {
+            'generated_at': datetime.now().isoformat(),
+            'method': upscaler.method,
+            'scale': scale,
+            **result
+        }
         reader.save_metadata(slug, upscaled_meta, source="upscaled")
     except Exception as e:
-        pass
+        logger.error(f"❌ Ошибка meta: {e}")
     
-    return {"status": "ok", "processed": processed, "skipped": skipped, "total": len(pages)}
+    return {
+        "status": "ok", 
+        **result,
+        "method": upscaler.method
+    }
+
+
 
 @app.get("/status/{slug}")
 async def get_upscale_status(slug: str):

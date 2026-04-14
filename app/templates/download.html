@@ -335,7 +335,8 @@
             async confirmDownload() {
                 const manga = this.downloadModal.manga;
                 const chapters = this.downloadModal.selectedChapters.join(',');
-                
+                console.log('selectedChapters:', this.downloadModal.selectedChapters);
+                console.log('chapters string:', chapters);
                 this.downloadModal.open = false;
                 
                 try {
