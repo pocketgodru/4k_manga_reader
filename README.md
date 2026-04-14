@@ -1,3 +1,4 @@
+
 # MangaReader 4K
 
 Веб-приложение для локальной библиотеки манги с тремя основными возможностями:
@@ -5,7 +6,7 @@
 - чтение глав в браузере,
 - апскейл страниц (4K) через `realesrgan-ncnn-vulkan` или CPU fallback.
 
-Проект работает на `FastAPI` + `Jinja2` (SSR-шаблоны) и хранит данные локально в папке `data/`.
+Проект работает на `FastAPI` и хранит данные локально в папке `data/`.
 
 ## Что делает проект
 
@@ -21,7 +22,6 @@
 - `Python 3`
 - `FastAPI` — HTTP API и сервер страниц
 - `Uvicorn` — ASGI сервер
-- `Jinja2` — HTML шаблоны
 - `Pydantic` — модели запросов/ответов и валидация
 - `aiohttp` — асинхронные HTTP запросы к MangaLib/CDN
 - `mangagraph` — поиск и часть данных по манге
@@ -31,9 +31,7 @@
 - `OpenCV (opencv-python-headless)` + `Pillow` + `numpy` — CPU fallback апскейл и постобработка
 
 ### Frontend
-- Серверный рендер через Jinja2
-- `Alpine.js` — клиентская логика (поиск, polling, модалки, прогресс)
-- `Tailwind CSS` (CDN) — стили интерфейса
+- Базовый HTML, CSS, JS
 
 ## Архитектура и структура проекта
 
@@ -65,7 +63,7 @@
 
 ### 1) Библиотека и чтение
 - `MangaReader` (`app/reader.py`) читает локальные папки манги из `data/manga`.
-- Главы сортируются по формату `v{том}c{номер}` с поддержкой дробных номеров (`8.1`, `8.3`).
+- Главы сортируются по формату `v{том}c{глава}` с поддержкой дробных номеров (`8.1`, `8.3`).
 - Для ридера используется endpoint `/image/{slug}/{chapter}/{page_idx}` с отдачей реального файла.
 
 ### 2) Поиск и скачивание
@@ -82,7 +80,7 @@
   - `ncnn-vulkan` (если exe + модели доступны),
   - иначе CPU pipeline (bicubic/lanczos + unsharp + contrast/sharpness).
 - Для пакетной обработки используется `/upscale/all/{slug}` и polling `/upscale/status/{task_id}`.
-- Результат пишется в `data/upscaled/{slug}/{chapter}`.
+- Результат пишется в  папку `data/upscaled/{slug}/{chapter}`.
 - Для одиночной главы: `/upscale/{slug}/{chapter}`.
 
 ## Конфигурация
@@ -197,4 +195,3 @@ data/
 - Добавить тесты на парсинг глав и валидацию `metadata.json`.
 - Вынести часть endpoint'ов в отдельные routers (сейчас `main.py` уже довольно большой).
 - Добавить docker-сборку и healthcheck endpoint.
-
